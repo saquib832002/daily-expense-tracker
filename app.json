@@ -1,0 +1,48 @@
+{
+  "expo": {
+    "name": "Expense Tracker",
+    "slug": "daily-expense-tracker",
+    "scheme": "expensetracker",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "platforms": [
+      "android"
+    ],
+    "android": {
+      "package": "com.mma.expensetracker",
+      "versionCode": 1,
+      "allowBackup": true,
+      "softwareKeyboardLayoutMode": "pan"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-sqlite",
+      "expo-localization",
+      "expo-local-authentication",
+      "expo-document-picker",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Lets you attach a photo of a bill to an expense. The photo stays on this phone.",
+          "cameraPermission": "Lets you photograph a bill so the app can read the amount. The photo stays on this phone."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 36,
+            "buildToolsVersion": "36.0.0"
+          }
+        }
+      ],
+      "./plugins/withSuppressUnsupportedCompileSdk"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "tsconfigPaths": true
+    }
+  }
+}

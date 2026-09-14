@@ -60,3 +60,8 @@ modules/*/android/build/
 modules/*/android/.gradle/
 modules/*/android/.cxx/
 modules/*/android/local.properties
+
+# Release signing key. Belt and braces — *.jks, *.keystore and
+# keystore.properties are already excluded above, but the folder is named here
+# too so nothing in it can ever be added by accident.
+keys/

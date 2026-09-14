@@ -3,6 +3,7 @@ import { randomUUID } from 'expo-crypto';
 
 import { normalizeMerchant } from '@/domain/merchant';
 import { nextOccurrence, occurrencesBetween, parseRRule } from '@/domain/recurrence';
+import { rescaleMinor, sameScale } from '@/domain/rebase';
 import { applyRules } from '@/domain/rules';
 
 import { db } from './client';
@@ -10,17 +11,21 @@ import {
   accounts,
   budgets,
   categories,
+  loyaltyCards,
   merchantMemory,
   outbox,
   recurring,
   rules,
   settings,
   transactions,
+  warranties,
   type Account,
   type Budget,
   type Category,
   type Recurring,
   type Rule,
+  type Warranty,
+  type LoyaltyCard,
   type Transaction,
 } from './schema';
 
@@ -36,6 +41,29 @@ async function trackChange(table: string, rowId: string, op: 'insert' | 'update'
 }
 
 /* ----------------------------------------------------------------- settings */
+
+/**
+ * The flag that says the welcome screen is done with.
+ *
+ * Written by `Welcome` and by nothing else. That sentence is the whole design,
+ * and it took three broken builds to arrive at, so the wreckage is worth
+ * keeping:
+ *
+ *   `onboarded`    — set on first launch by a check that counted every row in
+ *                    the database. `seedIfEmpty` had just written two dozen
+ *                    categories, so the count was never zero.
+ *   `onboarded_v2` — set on first launch by a check that counted transactions.
+ *                    Any phone that had ever recorded an expense stamped
+ *                    itself done. Reinstalling did not help, because Android
+ *                    Auto Backup restores the database, and the flag rides
+ *                    back in with it.
+ *
+ * A key that a previous build could have set automatically can never be
+ * trusted to mean "this person answered the questions", and no amount of
+ * reinstalling separates the two. A fresh key can: nothing has ever written
+ * `_v3` except the screen itself.
+ */
+export const ONBOARDED_KEY = 'onboarded_v3';
 
 export async function getSetting(key: string): Promise<string | null> {
   const rows = await db.select().from(settings).where(eq(settings.key, key)).limit(1);
@@ -54,6 +82,116 @@ export async function setSetting(key: string, value: string): Promise<void> {
 
 export async function getBaseCurrency(): Promise<string> {
   return (await getSetting('base_currency')) ?? 'INR';
+}
+
+/** Every distinct currency the ledger actually contains. */
+export async function ledgerCurrencies(): Promise<string[]> {
+  const rows = await db.selectDistinct({ currency: transactions.currency }).from(transactions);
+  const fromAccounts = await db.selectDistinct({ currency: accounts.currency }).from(accounts);
+  return [...new Set([...rows, ...fromAccounts].map((r) => r.currency))];
+}
+
+/**
+ * Change the currency every report is labelled in.
+ *
+ * The setting is the easy half. The hard half is `base_amount_minor`, which
+ * holds integer minor units whose meaning depends on the currency naming them:
+ * 123456 is ₹1,234.56 but ¥123,456 and 123.456 KWD. Move the label without
+ * moving the integers and every historical total changes by a factor of ten or
+ * a hundred, with nothing on screen to suggest anything happened.
+ *
+ * So when the precision changes, the column is rewritten. No exchange rate is
+ * applied — this app holds none — the amounts are re-denominated and keep their
+ * value, which is what someone means when they correct a currency the app
+ * guessed wrong on first launch.
+ */
+export async function setBaseCurrency(next: string): Promise<void> {
+  const from = await getBaseCurrency();
+  const to = next.toUpperCase();
+  if (from === to) return;
+
+  await setSetting('base_currency', to);
+  if (sameScale(from, to)) return;
+
+  // Rewritten row by row rather than with one arithmetic UPDATE, because the
+  // rounding rule (half away from zero, so an expense never shrinks) is in
+  // TypeScript where it is tested, not duplicated in SQL where it is not.
+  const rows = await db
+    .select({ id: transactions.id, base: transactions.baseAmountMinor })
+    .from(transactions);
+
+  for (const row of rows) {
+    await db
+      .update(transactions)
+      .set({ baseAmountMinor: rescaleMinor(row.base, from, to) })
+      .where(eq(transactions.id, row.id));
+  }
+}
+
+/**
+ * Keep the reporting currency in step with the account people actually use.
+ *
+ * There is no currency setting to manage any more, and that is the point: the
+ * phone says which country you are in, the first account is created in that
+ * country's currency, and reports are labelled to match. Nobody has to be shown
+ * a list of a hundred and eighty codes to confirm something the device already
+ * knew.
+ *
+ * The one case that needs handling is the person the automatic guess does not
+ * fit — an Indian in Dallas whose phone says USD but who keeps his budget in
+ * rupees. He changes his account to INR on the Accounts screen, and the reports
+ * have to follow, or they would be rupee amounts under a dollar heading.
+ *
+ * **Only while the ledger is empty.** That window is exactly the "I have just
+ * installed this and I am fixing the setup" moment, and closing it once real
+ * transactions exist means this can never silently re-denominate a history
+ * somebody has been building for months.
+ */
+/**
+ * Has this person ever entered anything?
+ *
+ * The question sounds like "is the database empty", and it is emphatically not.
+ * A fresh install is never empty: `seedIfEmpty` puts twenty-odd default
+ * categories, an account and a handful of settings rows in before the first
+ * screen renders. Counting *rows* therefore answers "yes, in use" for someone
+ * who has just tapped the icon for the first time — which is exactly the bug
+ * that kept the welcome screen from ever appearing.
+ *
+ * Only a transaction is evidence of a real user. Deleted ones count as gone,
+ * because to the person holding the phone they are.
+ */
+export async function hasAnyTransactions(): Promise<boolean> {
+  const [{ n } = { n: 0 }] = await db
+    .select({ n: sql<number>`COUNT(*)` })
+    .from(transactions)
+    .where(isNull(transactions.deletedAt));
+  return n > 0;
+}
+
+/**
+ * When they last recorded anything, or null if they never have.
+ *
+ * `createdAt`, not `occurredAt`, and the distinction is the whole point: this
+ * answers "have they used the app today", which is what the evening reminder
+ * needs to know. Someone entering last Tuesday's lunch has used the app today,
+ * and nudging them tonight would be telling them to do the thing they just did.
+ */
+export async function lastEntryAt(): Promise<number | null> {
+  const [row] = await db
+    .select({ at: sql<number>`MAX(${transactions.createdAt})` })
+    .from(transactions)
+    .where(isNull(transactions.deletedAt));
+  const at = row?.at;
+  return typeof at === 'number' && Number.isFinite(at) && at > 0 ? at : null;
+}
+
+export async function alignBaseCurrencyToAccounts(): Promise<void> {
+  if (await hasAnyTransactions()) return;
+
+  const first = (await listAccounts())[0];
+  if (!first) return;
+
+  await setBaseCurrency(first.currency);
 }
 
 export async function getFirstDayOfMonth(): Promise<number> {
@@ -102,10 +240,39 @@ export async function createAccount(input: {
   return id;
 }
 
+/**
+ * How many transactions an account holds — which decides whether its currency
+ * can still be changed.
+ *
+ * An account's currency is locked once money is in it, and rightly so: the
+ * amounts are integer minor units interpreted by that currency, so switching it
+ * later would rewrite the meaning of every row. But locking it from the moment
+ * of creation was too strict, and it is the case that actually bites — the app
+ * guesses your currency from the phone's region on first launch, and if it
+ * guessed wrong the very first thing you want to do is fix it, before you have
+ * entered anything at all.
+ */
+export async function accountTransactionCount(id: string): Promise<number> {
+  const rows = await db
+    .select({ n: sql<number>`COUNT(*)` })
+    .from(transactions)
+    .where(and(eq(transactions.accountId, id), isNull(transactions.deletedAt)));
+  return rows[0]?.n ?? 0;
+}
+
 export async function updateAccount(
   id: string,
-  patch: Partial<Pick<Account, 'name' | 'type' | 'icon' | 'openingBalanceMinor' | 'isArchived'>>,
+  patch: Partial<
+    Pick<Account, 'name' | 'type' | 'icon' | 'openingBalanceMinor' | 'isArchived' | 'currency'>
+  >,
 ): Promise<void> {
+  // Guard in the data layer, not only in the screen. A currency change on an
+  // account holding money is the kind of mistake that is invisible until a
+  // month-end total is wrong, so it is refused at the place every caller has
+  // to go through.
+  if (patch.currency && (await accountTransactionCount(id)) > 0) {
+    throw new Error('accountHasTransactions');
+  }
   await db
     .update(accounts)
     .set({ ...patch, updatedAt: Date.now(), dirty: 1 })
@@ -265,7 +432,14 @@ export async function addTransaction(input: NewExpenseInput): Promise<string> {
 
   // Teach the app: this merchant means this category. Free, instant, and the
   // reason we need no AI to categorize.
-  if (merchantKey && input.categoryId) {
+  //
+  // Only from a PERSON, though. This used to learn from anything with a
+  // category attached, including the scanner's own guess — so one bill filed
+  // under the wrong heading became a permanent memory, and that memory then
+  // outranked the lexicon on every future scan of the same shop. A guess that
+  // teaches itself is not learning, it is a feedback loop, and the wrong answer
+  // was the one that stuck.
+  if (merchantKey && input.categoryId && (input.categorySource ?? 'user') === 'user') {
     await rememberMerchant(merchantKey, input.categoryId);
   }
 
@@ -900,4 +1074,201 @@ export async function confirmAllInbox(): Promise<number> {
 /** Rejecting is a soft delete, so it can still be recovered. */
 export async function rejectInboxItem(id: string): Promise<void> {
   await softDeleteTransaction(id);
+}
+
+/* --------------------------------------------------------------- warranties */
+
+/**
+ * Everything still on record, expiring soonest first.
+ *
+ * Deleted rows are excluded but not destroyed, like everywhere else here: a
+ * warranty removed by accident is a receipt somebody no longer has.
+ */
+export async function listWarranties(): Promise<Warranty[]> {
+  return db
+    .select()
+    .from(warranties)
+    .where(isNull(warranties.deletedAt))
+    .orderBy(warranties.expiresOn);
+}
+
+export async function getWarranty(id: string): Promise<Warranty | null> {
+  const rows = await db
+    .select()
+    .from(warranties)
+    .where(and(eq(warranties.id, id), isNull(warranties.deletedAt)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export interface WarrantyInput {
+  productName: string;
+  brand?: string | null;
+  retailer?: string | null;
+  serial?: string | null;
+  purchasedOn: number;
+  months: number;
+  expiresOn: number;
+  priceMinor?: number | null;
+  currency?: string | null;
+  /** File names in the receipts folder. */
+  photos?: string[];
+  notes?: string | null;
+  transactionId?: string | null;
+}
+
+export async function createWarranty(input: WarrantyInput): Promise<string> {
+  const id = randomUUID();
+  const now = Date.now();
+
+  await db.insert(warranties).values({
+    id,
+    productName: input.productName.trim(),
+    brand: input.brand?.trim() || null,
+    retailer: input.retailer?.trim() || null,
+    serial: input.serial?.trim() || null,
+    purchasedOn: input.purchasedOn,
+    months: input.months,
+    expiresOn: input.expiresOn,
+    priceMinor: input.priceMinor ?? null,
+    currency: input.currency ?? null,
+    photos: input.photos && input.photos.length > 0 ? input.photos.join(',') : null,
+    notes: input.notes?.trim() || null,
+    transactionId: input.transactionId ?? null,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  await trackChange('warranties', id, 'insert');
+  return id;
+}
+
+export async function updateWarranty(id: string, patch: Partial<WarrantyInput>): Promise<void> {
+  const values: Record<string, unknown> = { updatedAt: Date.now(), dirty: 1 };
+
+  if (patch.productName !== undefined) values.productName = patch.productName.trim();
+  if (patch.brand !== undefined) values.brand = patch.brand?.trim() || null;
+  if (patch.retailer !== undefined) values.retailer = patch.retailer?.trim() || null;
+  if (patch.serial !== undefined) values.serial = patch.serial?.trim() || null;
+  if (patch.purchasedOn !== undefined) values.purchasedOn = patch.purchasedOn;
+  if (patch.months !== undefined) values.months = patch.months;
+  if (patch.expiresOn !== undefined) values.expiresOn = patch.expiresOn;
+  if (patch.priceMinor !== undefined) values.priceMinor = patch.priceMinor;
+  if (patch.currency !== undefined) values.currency = patch.currency;
+  if (patch.notes !== undefined) values.notes = patch.notes?.trim() || null;
+  if (patch.transactionId !== undefined) values.transactionId = patch.transactionId;
+  if (patch.photos !== undefined) {
+    values.photos = patch.photos.length > 0 ? patch.photos.join(',') : null;
+  }
+
+  await db.update(warranties).set(values).where(eq(warranties.id, id));
+  await trackChange('warranties', id, 'update');
+}
+
+export async function deleteWarranty(id: string): Promise<void> {
+  await db
+    .update(warranties)
+    .set({ deletedAt: Date.now(), updatedAt: Date.now(), dirty: 1 })
+    .where(eq(warranties.id, id));
+  await trackChange('warranties', id, 'delete');
+}
+
+/** The photo file names on a row, as a list. Empty when there are none. */
+export function warrantyPhotos(row: Pick<Warranty, 'photos'>): string[] {
+  return (row.photos ?? '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
+
+/* ------------------------------------------------------------ loyalty cards */
+
+/**
+ * The cards, most used first.
+ *
+ * Ordered by how often they have been opened rather than alphabetically,
+ * because the whole feature is "I am standing at the till" and the card you
+ * want is almost always the one you used last time.
+ */
+export async function listLoyaltyCards(): Promise<LoyaltyCard[]> {
+  return db
+    .select()
+    .from(loyaltyCards)
+    .where(isNull(loyaltyCards.deletedAt))
+    .orderBy(desc(loyaltyCards.usedCount), desc(loyaltyCards.lastUsedAt));
+}
+
+export interface LoyaltyCardInput {
+  name: string;
+  code: string;
+  symbology: string;
+  notes?: string | null;
+  colour?: string | null;
+  photos?: string[];
+}
+
+export async function createLoyaltyCard(input: LoyaltyCardInput): Promise<string> {
+  const id = randomUUID();
+  const now = Date.now();
+
+  await db.insert(loyaltyCards).values({
+    id,
+    name: input.name.trim(),
+    code: input.code.trim(),
+    symbology: input.symbology,
+    notes: input.notes?.trim() || null,
+    colour: input.colour ?? null,
+    photos: input.photos && input.photos.length > 0 ? input.photos.join(',') : null,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  await trackChange('loyalty_cards', id, 'insert');
+  return id;
+}
+
+export async function updateLoyaltyCard(
+  id: string,
+  patch: Partial<LoyaltyCardInput>,
+): Promise<void> {
+  const values: Record<string, unknown> = { updatedAt: Date.now(), dirty: 1 };
+  if (patch.name !== undefined) values.name = patch.name.trim();
+  if (patch.code !== undefined) values.code = patch.code.trim();
+  if (patch.symbology !== undefined) values.symbology = patch.symbology;
+  if (patch.notes !== undefined) values.notes = patch.notes?.trim() || null;
+  if (patch.colour !== undefined) values.colour = patch.colour;
+  if (patch.photos !== undefined) {
+    values.photos = patch.photos.length > 0 ? patch.photos.join(',') : null;
+  }
+
+  await db.update(loyaltyCards).set(values).where(eq(loyaltyCards.id, id));
+  await trackChange('loyalty_cards', id, 'update');
+}
+
+export async function deleteLoyaltyCard(id: string): Promise<void> {
+  await db
+    .update(loyaltyCards)
+    .set({ deletedAt: Date.now(), updatedAt: Date.now(), dirty: 1 })
+    .where(eq(loyaltyCards.id, id));
+  await trackChange('loyalty_cards', id, 'delete');
+}
+
+/**
+ * Record that a card was shown at a till.
+ *
+ * Deliberately not tracked through the sync outbox: how often somebody opens
+ * their Croma card is the app's own housekeeping, not a fact about their money.
+ */
+export async function markCardUsed(id: string): Promise<void> {
+  await db
+    .update(loyaltyCards)
+    .set({ usedCount: sql`${loyaltyCards.usedCount} + 1`, lastUsedAt: Date.now() })
+    .where(eq(loyaltyCards.id, id));
+}
+
+export function loyaltyCardPhotos(row: Pick<LoyaltyCard, 'photos'>): string[] {
+  return (row.photos ?? '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
 }

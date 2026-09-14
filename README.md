@@ -192,7 +192,12 @@ Both exist to keep the Windows build simple. Both are easy to change later, and 
 
 ## How your data survives a new phone
 
-There is no server and no account, so this is worth understanding rather than assuming.
+There is no server — but there **is** a sign-in. Signing in with Google is
+required on first launch, and the account it authorises is used for exactly one
+thing: writing backups to that person's own Google Drive. Nothing is sent to the
+developer, and there is no account to create, no password, and nothing stored
+anywhere but the phone and the user's own Drive. Worth understanding rather than
+assuming.
 
 | Layer | Saves you from | Needs you to remember anything? |
 |---|---|---|
@@ -277,6 +282,12 @@ encrypt the database on disk. Anyone with physical access and developer tools
 could still read it. Saying so plainly is deliberate — a lock that implies more
 than it delivers is worse than none.
 
-**Privacy:** no accounts, no analytics, no sync, and your data — including every bill photo — never leaves the phone.
+**Privacy:** no analytics, no sync to anybody else's server, and no bill photo ever leaves the phone. A Google sign-in is required at first launch; it authorises backups to **your own** Drive and gives the developer nothing. The app can see only the backup files it creates there — not the rest of your Drive.
+
+**Network calls, in full.** Three, and none of them carry your expenses: the
+required Google sign-in; the backups it writes to **your own** Drive; and the
+currency converter, which asks a free rate service what a dollar is worth and
+sends nothing but a currency code. Rates are cached on the phone so the
+converter works offline.
 
 **One honest exception.** The bill scanner uses Google's ML Kit. The photo is read entirely on the device and is never uploaded, but the ML Kit library itself reports usage diagnostics to Google. That is a condition of using it, it cannot be turned off, and **it has to be disclosed in the privacy policy** before you publish. It is the only thing in the app that touches the network. If you would rather have nothing at all, the scanner is the one feature to drop — everything else stays true.

@@ -96,7 +96,7 @@ Realistic Play timeline once you start: ~14 days testing (allow 18–21 for marg
 | Target API 36 | Android 16, required for new apps since **31 August 2026**. **SDK 52 targets 34**, so a Play submission needs either a newer SDK or an `expo-build-properties` override — untested against RN 0.76, so try it before relying on it. Does not affect Indus or your own phone. |
 | Data safety form | Mandatory. Short for us — see §4.3. |
 | Privacy policy URL | Required. A static page — GitHub Pages, or the site you already run. |
-| Account deletion page | **Not needed in v1** — no accounts. See §4.3. |
+| Account deletion page | **Re-check before submitting.** The app now requires a Google sign-in. It still creates no account on any server — sign-in only authorises the user's own Drive — so the policy's account-creation trigger arguably does not apply. But a reviewer sees a mandatory sign-in, so be ready to point at: Sign out in More, and the fact that deleting the app's Drive folder is entirely in the user's hands. See §4.3. |
 | Don't go dormant | Accounts under 1,000 installs with no Console activity for 180 days get closed, and the $25 isn't refunded. Calendar reminder every five months. |
 
 ### 2.5 SMS auto-capture — still sequenced, and now easier
@@ -180,7 +180,7 @@ After a few weeks this is right most of the time, and it improves the more you u
 
 This began as a defence against free-tier cold starts, survived the move to your own VPS, and on 3 September 2026 finished the journey: once the phone is the source of truth and backup files already move data between phones, the server has nothing left to do. So there isn't one.
 
-**Your data never makes a network call.** No analytics, no crash reporting, no update check, no account, and no bill photo ever leaves the phone. One caveat, stated plainly because a privacy claim with a hidden exception is worse than no claim: the bill scanner uses Google's **ML Kit**, which reads the photo entirely on the device but reports its own usage diagnostics to Google. That cannot be switched off, it must be disclosed in the privacy policy, and it is the only thing in the app that touches the network. Drop the scanner and the absolute claim comes back.
+**Your data never makes a network call to us.** No analytics, no crash reporting, no update check, and no bill photo ever leaves the phone. Three things use the network, none of them carrying a user's expenses: the required Google sign-in; the backups written into the user's own Drive; and the currency converter, which sends one currency code to a free rate service and caches the answer on the phone. One caveat, stated plainly because a privacy claim with a hidden exception is worse than no claim: the bill scanner uses Google's **ML Kit**, which reads the photo entirely on the device but reports its own usage diagnostics to Google. That cannot be switched off and it must be disclosed in the privacy policy. It is the only network call the user did not ask for.
 
 ```
 ┌────────────────────── ANDROID APP (the whole product) ─────────────────────┐
@@ -197,7 +197,7 @@ This began as a defence against free-tier cold starts, survived the move to your
 │              files/backups/   auto-YYYYMMDD-HHMM.json  (last 5)            │
 │              files/receipts/  images — these never leave the phone         │
 └──────────────────────────────────────┬─────────────────────────────────────┘
-                                       │  no network · no account · no server
+                                       │  no network ·  own Drive  · no server
                     ┌──────────────────┴───────────────────┐
                     ▼                                      ▼
       ┌───────────────────────────────┐   ┌───────────────────────────────┐

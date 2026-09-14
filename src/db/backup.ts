@@ -15,12 +15,14 @@ import {
   accounts,
   budgets,
   categories,
+  loyaltyCards,
   merchantMemory,
   recurring,
   rules,
   settings,
   transactionSplits,
   transactions,
+  warranties,
 } from './schema';
 
 /** Bump only when the shape changes incompatibly. Restore refuses anything newer. */
@@ -45,6 +47,8 @@ const TABLES = {
   rules,
   merchant_memory: merchantMemory,
   recurring,
+  warranties,
+  loyalty_cards: loyaltyCards,
 } as const;
 
 /**

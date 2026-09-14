@@ -11,9 +11,9 @@ import {
 } from '@/db/queries';
 import type { Account, Category } from '@/db/schema';
 import { relativeDayKey } from '@/domain/dates';
-import { minorToDecimalString, parseAmountToMinor } from '@/domain/money';
-import { parseReceipt, type ReceiptGuess } from '@/domain/receipt';
-import { formatDate, t } from '@/i18n';
+import { formatMinor, minorToDecimalString, parseAmountToMinor } from '@/domain/money';
+import { parseReceiptFromLines, type ReceiptGuess } from '@/domain/receipt';
+import { formatDate, prefersDayFirst, t } from '@/i18n';
 import { OCR_UNAVAILABLE, isOcrAvailable, readImage } from '@/services/ocr';
 import {
   deleteReceipt,
@@ -49,6 +49,7 @@ export default function ScanScreen() {
   const [ocrProblem, setOcrProblem] = useState<'none' | 'unreadable' | 'notBuilt'>('none');
   /** The raw failure, shown small. One screenshot then explains everything. */
   const [ocrDetail, setOcrDetail] = useState<string | null>(null);
+  const [showRead, setShowRead] = useState(false);
 
   const [currency, setCurrency] = useState('INR');
   const [accountList, setAccountList] = useState<Account[]>([]);
@@ -60,6 +61,14 @@ export default function ScanScreen() {
   const [occurredAt, setOccurredAt] = useState(() => Date.now());
   const [accountId, setAccountId] = useState<string | null>(null);
   const [categoryId, setCategoryId] = useState<string | null>(null);
+  /**
+   * Where the pre-selected category came from, in the user's words. Null when
+   * nothing was pre-selected, so the screen stays quiet rather than explaining
+   * an absence.
+   */
+  const [categoryWhy, setCategoryWhy] = useState<string | null>(null);
+  /** Has a person touched the category? Decides whether the app learns from it. */
+  const [categoryTouched, setCategoryTouched] = useState(false);
   const [sheet, setSheet] = useState<'none' | 'account' | 'date'>('none');
   const [saving, setSaving] = useState(false);
 
@@ -100,6 +109,20 @@ export default function ScanScreen() {
       setOcrProblem('none');
       setOcrDetail(null);
 
+      // Read the photo at FULL resolution, before it is shrunk for storage.
+      // Small print is exactly what OCR struggles with, and the stored copy is
+      // deliberately compressed — reading that instead throws away accuracy we
+      // already have in hand.
+      let lines: Awaited<ReturnType<typeof readImage>>['lines'] = [];
+      let ocrFailed: string | null = null;
+      try {
+        lines = (await readImage(picked.uri)).lines;
+      } catch (e) {
+        ocrFailed = e instanceof Error ? e.message : String(e);
+      }
+
+      // The photo is kept whatever happens next: a bill you photographed is
+      // worth keeping even if nothing could be read off it.
       let name: string | null = null;
       try {
         name = await saveReceipt(picked);
@@ -110,21 +133,27 @@ export default function ScanScreen() {
         return;
       }
 
-      // The photo is kept whatever happens next: a bill you photographed is
-      // worth keeping even if nothing could be read off it.
-      try {
-        const { text } = await readImage(receiptUri(name));
+      if (ocrFailed !== null) {
+        setOcrProblem(ocrFailed === OCR_UNAVAILABLE ? 'notBuilt' : 'unreadable');
+        if (ocrFailed !== OCR_UNAVAILABLE) setOcrDetail(ocrFailed);
+        setStage('confirm');
+        return;
+      }
 
+      try {
         // OCR can succeed and find nothing. Silence here leaves the user
         // staring at an empty form with no idea whether it even tried.
-        if (text.trim().length === 0) {
+        if (lines.length === 0) {
           setOcrProblem('unreadable');
           setOcrDetail(t('scan.readNothing'));
           setStage('confirm');
           return;
         }
 
-        const found = parseReceipt(text, { currency: entryCurrency });
+        const found = parseReceiptFromLines(lines, {
+          currency: entryCurrency,
+          dayFirst: prefersDayFirst(),
+        });
         setGuess(found);
         if (found.amountMinor != null) {
           setAmount(minorToDecimalString(found.amountMinor, entryCurrency));
@@ -136,19 +165,33 @@ export default function ScanScreen() {
         // learned when you last corrected this shop, and only then the words
         // on the bill. The weakest source must never overwrite a stronger one.
         let chosen: string | null = null;
+        let why: string | null = null;
         if (found.merchant) {
           const suggestion = await suggestForDraft({ merchant: found.merchant, note: '' });
-          if (suggestion.categoryId) chosen = suggestion.categoryId;
+          if (suggestion.categoryId) {
+            chosen = suggestion.categoryId;
+            why = t('scan.whyRemembered', { merchant: found.merchant });
+          }
           if (suggestion.accountId) setAccountId(suggestion.accountId);
         }
         if (!chosen && found.categoryKey) {
           chosen = categoryList.find((c) => c.nameKey === found.categoryKey)?.id ?? null;
+          if (chosen) {
+            // Say which words did it. A category that appears out of nowhere is
+            // one people stop trusting the first time it is wrong; one that
+            // shows its working can be corrected with confidence instead.
+            why =
+              found.categoryFrom === 'shop'
+                ? t('scan.whyShop', { words: found.categoryEvidence.join(', ') })
+                : t('scan.whyItems', { words: found.categoryEvidence.join(', ') });
+          }
         }
         setCategoryId(chosen);
+        setCategoryWhy(chosen ? why : null);
+        setCategoryTouched(false);
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        setOcrProblem(message === OCR_UNAVAILABLE ? 'notBuilt' : 'unreadable');
-        if (message !== OCR_UNAVAILABLE) setOcrDetail(message);
+        setOcrProblem('unreadable');
+        setOcrDetail(e instanceof Error ? e.message : String(e));
       }
 
       setStage('confirm');
@@ -176,14 +219,17 @@ export default function ScanScreen() {
         kind: 'expense',
         fxRate: 1,
         source: 'ocr',
-        categorySource: categoryId ? 'user' : undefined,
+        // 'user' only when a person actually tapped it — see the note on
+        // learning in addTransaction. Passing 'user' for the scanner's own
+        // guess is what would make a mistake permanent.
+        categorySource: categoryTouched ? 'user' : categoryId ? 'ocr' : undefined,
         receiptPath: receiptName,
       });
       router.back();
     } finally {
       setSaving(false);
     }
-  }, [account, minor, categoryId, merchant, note, occurredAt, receiptName, router]);
+  }, [account, minor, categoryId, categoryTouched, merchant, note, occurredAt, receiptName, router]);
 
   /** Backing out must not leave an orphan photo in the folder. */
   const discard = useCallback(() => {
@@ -236,6 +282,12 @@ export default function ScanScreen() {
     );
   }
 
+  // A labelled TOTAL is worth trusting; anything else deserves a second
+  // opinion. Either way the amount field itself is always editable.
+  const alternatives = (guess?.amountFrom === 'total' ? [] : (guess?.candidates ?? []))
+    .filter((c) => c.minor !== minor)
+    .slice(0, 3);
+
   const dateKey = relativeDayKey(occurredAt);
   const foundNote =
     guess?.amountFrom === 'total'
@@ -281,6 +333,25 @@ export default function ScanScreen() {
           </Text>
         ) : null}
 
+        {/* Alternatives, but only when we are actually unsure.
+            A row that said TOTAL is trustworthy, and offering four other
+            numbers beside a figure we are confident in reads as doubt rather
+            than helpfulness. When nothing announced itself, up to three. */}
+        {alternatives.length > 0 ? (
+          <>
+            <Text style={[styles.hint, { color: theme.textDim }]}>{t('scan.otherAmounts')}</Text>
+            <View style={styles.candidates}>
+              {alternatives.map((c) => (
+                <Chip
+                  key={c.minor}
+                  label={formatMinor(c.minor, entryCurrency, { compact: true })}
+                  onPress={() => setAmount(minorToDecimalString(c.minor, entryCurrency))}
+                />
+              ))}
+            </View>
+          </>
+        ) : null}
+
         <Field
           label={t('add.merchant')}
           value={merchant}
@@ -314,19 +385,60 @@ export default function ScanScreen() {
             </Text>
           </Pressable>
         </View>
+
+        {/* `09/04` is 4 September in Mumbai and 9 April in Boston. When the
+            bill itself gives no clue which, say so and make the other reading
+            one tap rather than silently picking. */}
+        {guess?.dateAlternative != null && guess.dateAlternative !== occurredAt ? (
+          <>
+            <Text style={[styles.hint, { color: theme.warn }]}>{t('scan.dateAmbiguous')}</Text>
+            <View style={styles.candidates}>
+              <Chip
+                label={t('scan.dateOr', { date: formatDate(guess.dateAlternative, 'long') })}
+                onPress={() => setOccurredAt(guess.dateAlternative!)}
+              />
+            </View>
+          </>
+        ) : null}
       </Card>
 
       <SectionLabel>{t('add.chooseCategory')}</SectionLabel>
+      {categoryWhy ? (
+        <Text style={[styles.why, { color: theme.accent }]}>{categoryWhy}</Text>
+      ) : null}
       <View style={styles.categories}>
         {categoryList.map((c) => (
           <Chip
             key={c.id}
             label={`${c.icon ?? ''} ${c.customName ?? t(c.nameKey ?? '')}`.trim()}
             active={categoryId === c.id}
-            onPress={() => setCategoryId((prev) => (prev === c.id ? null : c.id))}
+            onPress={() => {
+              // A tap is a person taking responsibility for the answer: the
+              // explanation goes away, and this is now something worth learning.
+              setCategoryTouched(true);
+              setCategoryWhy(null);
+              setCategoryId((prev) => (prev === c.id ? null : c.id));
+            }}
           />
         ))}
       </View>
+
+      {/* Showing the reading builds trust in a way no accuracy claim can:
+          when it gets something wrong you can see exactly why. */}
+      {guess && guess.rows.length > 0 ? (
+        <Card>
+          <Pressable onPress={() => setShowRead((v) => !v)} hitSlop={6}>
+            <Text style={[styles.disclosure, { color: theme.accent }]}>
+              {showRead ? t('scan.hideRead') : t('scan.showRead', { rows: guess.rows.length })}
+            </Text>
+          </Pressable>
+          {showRead ? (
+            <Text style={[styles.readout, { color: theme.textDim }]} selectable>
+              {guess.rows.join('\n')}
+            </Text>
+          ) : null}
+        </Card>
+      ) : null}
 
       <Button label={t('scan.save')} onPress={save} disabled={!canSave} />
       <Button label={t('scan.discard')} variant="secondary" onPress={discard} />
@@ -374,5 +486,9 @@ const styles = StyleSheet.create({
   pickRow: { flex: 1, borderWidth: 1, borderRadius: radius.md, padding: space.md, gap: 2 },
   pickLabel: { fontSize: type.tiny, textTransform: 'uppercase', letterSpacing: 0.6 },
   pickValue: { fontSize: type.small, fontWeight: '600' },
+  why: { fontSize: type.small, fontWeight: '600', lineHeight: 18 },
   categories: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
+  candidates: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
+  disclosure: { fontSize: type.small, fontWeight: '600' },
+  readout: { fontSize: type.tiny, lineHeight: 16, fontFamily: 'monospace' },
 });

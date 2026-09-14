@@ -1,0 +1,6 @@
+{
+  "platforms": ["android"],
+  "android": {
+    "modules": ["com.mma.expensetracker.driveauth.GoogleDriveAuthModule"]
+  }
+}

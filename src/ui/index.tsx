@@ -8,6 +8,7 @@
 import { useRouter } from 'expo-router';
 import type { ReactNode } from 'react';
 import {
+  I18nManager,
   Modal,
   Pressable,
   ScrollView,
@@ -20,6 +21,17 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { radius, space, type, useTheme } from '@/theme';
+
+/**
+ * Arrows are direction, not decoration.
+ *
+ * "Back" points the way you came from, and in Arabic and Urdu you came from the
+ * right. A back chevron still pointing left in a mirrored interface reads as
+ * "forward", which is the one thing it must not say. Same for the row chevron
+ * that means "opens something".
+ */
+const BACK_CHEVRON = I18nManager.isRTL ? '›' : '‹';
+const FORWARD_CHEVRON = I18nManager.isRTL ? '‹' : '›';
 
 /* ------------------------------------------------------------------ screen */
 
@@ -46,7 +58,7 @@ export function Screen({
         <View style={[styles.header, { borderBottomColor: theme.border }]}>
           {back ? (
             <Pressable onPress={() => router.back()} hitSlop={12} style={styles.back}>
-              <Text style={{ color: theme.accent, fontSize: 22 }}>‹</Text>
+              <Text style={{ color: theme.accent, fontSize: 22 }}>{BACK_CHEVRON}</Text>
             </Pressable>
           ) : null}
           <Text style={[styles.headerTitle, { color: theme.text }]} numberOfLines={1}>
@@ -129,7 +141,9 @@ export function ListRow({
       {value ? (
         <Text style={[styles.rowValue, { color: valueColor ?? theme.text }]}>{value}</Text>
       ) : null}
-      {chevron ? <Text style={{ color: theme.textDim, fontSize: 18 }}>›</Text> : null}
+      {chevron ? (
+        <Text style={{ color: theme.textDim, fontSize: 18 }}>{FORWARD_CHEVRON}</Text>
+      ) : null}
     </Pressable>
   );
 }
@@ -172,7 +186,11 @@ export function Button({
         {
           backgroundColor: bg,
           borderColor: variant === 'secondary' ? theme.border : bg,
-          opacity: disabled ? 0.4 : pressed ? 0.85 : 1,
+          // 0.6, not 0.4. Fading a control is the standard way to say "not
+          // yet", but it multiplies every contrast ratio inside it, and 0.4
+          // takes a comfortable label below the 4.5:1 that makes text readable
+          // at all. Disabled should look unavailable, not look absent.
+          opacity: disabled ? 0.6 : pressed ? 0.85 : 1,
         },
       ]}
     >
@@ -287,7 +305,7 @@ const styles = StyleSheet.create({
     paddingBottom: space.md,
     borderBottomWidth: 1,
   },
-  back: { paddingRight: space.xs },
+  back: { paddingEnd: space.xs },
   headerTitle: { flex: 1, fontSize: type.title, fontWeight: '600' },
   headerRight: { flexDirection: 'row', gap: space.sm },
   body: { padding: space.lg, gap: space.lg },

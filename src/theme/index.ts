@@ -17,6 +17,16 @@ export interface Palette {
   text: string;
   textDim: string;
   border: string;
+  /**
+   * An edge you are meant to SEE, as opposed to `border`, which only groups.
+   *
+   * `border` sits at about 1.3:1 against the page — right for separating rows
+   * in a list, useless for telling someone "this is a button". Anything a
+   * person has to find and press gets this instead: it clears 3:1 against both
+   * the page and the surfaces controls sit on, which is the contrast floor for
+   * a non-text UI element.
+   */
+  borderStrong: string;
   accent: string;
   accentSoft: string;
   expense: string;
@@ -41,6 +51,7 @@ const light: Palette = {
   text: '#191B1F',
   textDim: '#6B7079',
   border: '#E1DED6',
+  borderStrong: '#8B8574',
   accent: '#14574B',
   accentSoft: '#DCEAE5',
   expense: '#993128',
@@ -60,6 +71,7 @@ const dark: Palette = {
   text: '#E8E6E0',
   textDim: '#8E949D',
   border: '#2A2E34',
+  borderStrong: '#666E7B',
   accent: '#57BFA8',
   accentSoft: '#16302C',
   expense: '#DB8074',

@@ -1,7 +1,7 @@
 import { Tabs } from 'expo-router';
 import { Text, type ColorValue } from 'react-native';
 
-import { t } from '@/i18n';
+import { t, useLanguage } from '@/i18n';
 import { useTheme } from '@/theme';
 
 /** Emoji stand in for icons until the icon set lands in Phase 2. */
@@ -11,6 +11,10 @@ function TabIcon({ glyph, color }: { glyph: string; color: ColorValue }) {
 
 export default function TabsLayout() {
   const theme = useTheme();
+  // The tab bar mounts once and sits above every screen, so nothing else ever
+  // re-renders it. Without this subscription the five tab labels keep the
+  // language the app launched in no matter what the user picks.
+  useLanguage();
 
   return (
     <Tabs

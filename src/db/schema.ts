@@ -203,6 +203,94 @@ export const recurring = sqliteTable(
   (t) => [index('recurring_due_idx').on(t.isEnabled, t.nextDueOn)],
 );
 
+/* ---------------------------------------------------------------- warranties */
+
+/**
+ * Warranties, guarantees and AMCs.
+ *
+ * A deliberately separate table rather than a flag on `transactions`, because
+ * the two have almost nothing in common. A warranty outlives the expense that
+ * created it by years; it is edited long after the purchase is history; most
+ * people want to record one for a thing they bought before they installed this
+ * app; and plenty of the useful fields — serial number, retailer, the photo of
+ * the card in the box — mean nothing to a ledger entry. `transactionId` links
+ * the two when there is a link, and is null the rest of the time.
+ *
+ * `expiresOn` is stored rather than derived from `purchasedOn + months`. The
+ * arithmetic is trivial, but this column is what the list sorts on, what the
+ * reminder scheduler scans, and what an index can actually serve — and it
+ * leaves room for the cases the arithmetic cannot express, such as an extended
+ * warranty bought later that moves the date without changing the purchase.
+ */
+export const warranties = sqliteTable(
+  'warranties',
+  {
+    ...syncColumns,
+    productName: text('product_name').notNull(),
+    brand: text('brand'),
+    /** Where it was bought. The shop is who you go back to for a claim. */
+    retailer: text('retailer'),
+    /** Serial or model number — the thing every claim form asks for first. */
+    serial: text('serial'),
+    purchasedOn: integer('purchased_on').notNull(),
+    /** Length of cover in months. Kept so the form can show what was chosen. */
+    months: integer('months').notNull().default(12),
+    expiresOn: integer('expires_on').notNull(),
+    priceMinor: integer('price_minor'),
+    currency: text('currency'),
+    /**
+     * Photos of the receipt, the warranty card, the serial plate. Stored as
+     * file names in the app's receipts folder, comma separated — the same
+     * device-only storage as bill photos, and excluded from cloud backup for
+     * the same reason.
+     */
+    photos: text('photos'),
+    notes: text('notes'),
+    /** The expense this came from, when it came from one. */
+    transactionId: text('transaction_id'),
+  },
+  (t) => [index('warranty_expiry_idx').on(t.expiresOn)],
+);
+
+/* ------------------------------------------------------------- loyalty cards */
+
+/**
+ * Loyalty and membership cards.
+ *
+ * The point of this table is the wallet in somebody's back pocket: eight plastic
+ * cards they never carry, so the points never get collected. What the till
+ * actually needs is the number, in a form the scanner can read off a screen —
+ * so `code` is the payload exactly as scanned, and `symbology` is what it was
+ * scanned as, because the same digits drawn as EAN-13 and as Code 128 are two
+ * different barcodes and only one of them will beep.
+ *
+ * Photos of the card front and back are kept for the cases a barcode cannot
+ * cover: a card with no barcode, a handwritten number, the terms printed on the
+ * back. Same device-only folder as bill photos.
+ */
+export const loyaltyCards = sqliteTable(
+  'loyalty_cards',
+  {
+    ...syncColumns,
+    /** The shop. This is what people search by. */
+    name: text('name').notNull(),
+    /** The scanned payload, or a number typed in by hand. */
+    code: text('code').notNull(),
+    /** code128 | ean13 | qr | unknown — what the scanner said it was. */
+    symbology: text('symbology').notNull().default('unknown'),
+    /** Free text: the membership tier, the phone number the account is under. */
+    notes: text('notes'),
+    /** Hex, for the card's colour in the list. */
+    colour: text('colour'),
+    /** Photos of the card itself, comma separated file names. */
+    photos: text('photos'),
+    /** Bumped on every use, so the cards you actually use float to the top. */
+    usedCount: integer('used_count').notNull().default(0),
+    lastUsedAt: integer('last_used_at'),
+  },
+  (t) => [index('loyalty_name_idx').on(t.name)],
+);
+
 /* ---------------------------------------------------------------- fx & capture */
 
 /** Cached rates, so multi-currency works offline from the last known values. */
@@ -254,3 +342,6 @@ export type Budget = typeof budgets.$inferSelect;
 export type NewBudget = typeof budgets.$inferInsert;
 export type Rule = typeof rules.$inferSelect;
 export type Recurring = typeof recurring.$inferSelect;
+export type Warranty = typeof warranties.$inferSelect;
+export type LoyaltyCard = typeof loyaltyCards.$inferSelect;
+export type NewWarranty = typeof warranties.$inferInsert;

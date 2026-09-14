@@ -273,7 +273,8 @@ function PaceBar({ pace, color }: { pace: BudgetPace; color: string }) {
         style={[
           styles.marker,
           {
-            left: `${Math.min(100, pace.fractionElapsed * 100)}%`,
+            // start, not left — see the note on Meter in src/ui/charts.tsx.
+            start: `${Math.min(100, pace.fractionElapsed * 100)}%`,
             backgroundColor: theme.text,
           },
         ]}

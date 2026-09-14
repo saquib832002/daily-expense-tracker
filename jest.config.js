@@ -8,5 +8,8 @@
 module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
-  roots: ['<rootDir>/src/domain'],
+  // The i18n tests read the JSON files and the screens as plain text, so they
+  // need no React Native runtime either — and they are the only guard that a
+  // string added in English reaches Hindi, Urdu and Arabic before a user does.
+  roots: ['<rootDir>/src/domain', '<rootDir>/src/i18n'],
 };

@@ -1,0 +1,27 @@
+# Line endings.
+#
+# Every source file in this repository is written with LF. Git on Windows
+# defaults to converting them to CRLF on checkout, which is where the
+# "LF will be replaced by CRLF" warnings come from — dozens of them, on every
+# `git add`, saying nothing useful.
+#
+# This settles it: the repository stores LF, and checkouts get LF on every
+# platform. Windows editors have handled LF for years, and the alternative is
+# a repository whose line endings depend on which machine last touched it.
+* text=auto eol=lf
+
+# Keep these byte-for-byte whatever the setting above says.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.keystore binary
+*.jks binary
+*.tgz binary
+*.zip binary
+*.aab binary
+*.apk binary

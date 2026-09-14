@@ -1,5 +1,5 @@
 import { randomUUID } from 'expo-crypto';
-import { getLocales } from 'expo-localization';
+import { deviceCurrency } from '@/services/region';
 
 import { detectLanguage } from '@/i18n';
 
@@ -37,20 +37,15 @@ const DEFAULT_INCOME_CATEGORIES: { key: string; icon: string; color: string }[] 
   { key: 'category.refund', icon: '↩️', color: '#5C9A85' },
 ];
 
-/** Currency guess from the device locale. Indian devices get INR. */
-function guessCurrency(): string {
-  try {
-    // expo-localization gives the region; keep the mapping tiny and explicit.
-    const region = getLocales()[0]?.regionCode ?? 'IN';
-    const map: Record<string, string> = {
-      IN: 'INR', US: 'USD', GB: 'GBP', AE: 'AED', SG: 'SGD',
-      AU: 'AUD', CA: 'CAD', JP: 'JPY', DE: 'EUR', FR: 'EUR',
-    };
-    return map[region] ?? 'INR';
-  } catch {
-    return 'INR';
-  }
-}
+/**
+ * Currency for a brand-new install, from the OS.
+ *
+ * This used to be a sixteen-line table that answered INR for every country not
+ * on it — which, for an app going worldwide, is a wrong answer roughly a
+ * hundred and eighty times over. Android already knows the currency for the
+ * region the user set; `deviceCurrency` asks it and keeps a small map only for
+ * the Android builds that report a region but no currency.
+ */
 
 /**
  * Runs once, after migrations, on a fresh install. Safe to call on every
@@ -60,7 +55,7 @@ export async function seedIfEmpty(): Promise<void> {
   const existing = await db.select().from(categories).limit(1);
   if (existing.length > 0) return;
 
-  const currency = guessCurrency();
+  const currency = deviceCurrency();
   const now = Date.now();
 
   await db.insert(settings).values([

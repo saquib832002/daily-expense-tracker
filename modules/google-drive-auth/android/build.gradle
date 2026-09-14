@@ -1,0 +1,39 @@
+apply plugin: 'com.android.library'
+
+group = 'com.mma.expensetracker.driveauth'
+version = '0.1.0'
+
+def expoModulesCorePlugin = new File(
+  project(":expo-modules-core").projectDir.absolutePath,
+  "ExpoModulesCorePlugin.gradle"
+)
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+
+android {
+  namespace "com.mma.expensetracker.driveauth"
+  compileSdkVersion rootProject.ext.has("compileSdkVersion") ? rootProject.ext.compileSdkVersion : 35
+
+  defaultConfig {
+    minSdkVersion rootProject.ext.has("minSdkVersion") ? rootProject.ext.minSdkVersion : 24
+    targetSdkVersion rootProject.ext.has("targetSdkVersion") ? rootProject.ext.targetSdkVersion : 35
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  kotlinOptions {
+    jvmTarget = "17"
+  }
+}
+
+dependencies {
+  // The AuthorizationClient half of Play Services Auth. This is the API Google
+  // points to for OAuth scopes now that the old GoogleSignIn client is
+  // deprecated — authorization was deliberately split away from sign-in, and
+  // only the sign-in half is going away.
+  implementation "com.google.android.gms:play-services-auth:21.3.0"
+}

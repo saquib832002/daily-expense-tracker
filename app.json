@@ -5,12 +5,23 @@
     "scheme": "expensetracker",
     "version": "0.1.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0E3E35"
+    },
     "userInterfaceStyle": "automatic",
     "platforms": [
       "android"
     ],
     "android": {
       "package": "com.mma.expensetracker",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0E3E35",
+        "monochromeImage": "./assets/monochrome-icon.png"
+      },
       "versionCode": 1,
       "allowBackup": true,
       "softwareKeyboardLayoutMode": "pan"
@@ -38,7 +49,23 @@
           }
         }
       ],
-      "./plugins/withSuppressUnsupportedCompileSdk"
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#0E3E35",
+          "defaultChannel": "reminders"
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Lets you scan the barcode on a loyalty card so you do not have to type the number.",
+          "recordAudioAndroid": false
+        }
+      ],
+      "./plugins/withSuppressUnsupportedCompileSdk",
+      "./plugins/withBackupRules"
     ],
     "experiments": {
       "typedRoutes": true,

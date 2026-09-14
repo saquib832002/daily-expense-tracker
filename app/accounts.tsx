@@ -4,6 +4,8 @@ import { StyleSheet, Text, View } from 'react-native';
 
 import {
   accountBalances,
+  accountTransactionCount,
+  alignBaseCurrencyToAccounts,
   createAccount,
   getBaseCurrency,
   listAccounts,
@@ -42,6 +44,8 @@ export default function AccountsScreen() {
   const [name, setName] = useState('');
   const [accType, setAccType] = useState<string>('cash');
   const [currency, setCurrency] = useState('INR');
+  /** Transactions in the account being edited. Zero means currency is unlocked. */
+  const [entryCount, setEntryCount] = useState(0);
   const [opening, setOpening] = useState('');
 
   const load = useCallback(async () => {
@@ -62,14 +66,20 @@ export default function AccountsScreen() {
     setAccType('cash');
     setCurrency(baseCurrency);
     setOpening('');
+    setEntryCount(0);
     setEditing('new');
   }, [baseCurrency]);
 
-  const openEdit = useCallback((a: Account) => {
+  const openEdit = useCallback(async (a: Account) => {
     setName(a.name);
     setAccType(a.type);
     setCurrency(a.currency);
     setOpening(minorToDecimalString(a.openingBalanceMinor, a.currency));
+    // An empty account can still change its currency. This is the case that
+    // matters: the app guesses your currency from the phone's region on first
+    // launch, and if it guessed wrong you want to fix it immediately — before
+    // there is any money in the account to reinterpret.
+    setEntryCount(await accountTransactionCount(a.id));
     setEditing(a);
   }, []);
 
@@ -86,18 +96,24 @@ export default function AccountsScreen() {
         icon: TYPE_ICONS[accType],
       });
     } else if (editing) {
-      // Currency is deliberately not editable — changing it after transactions
-      // exist would silently reinterpret every amount already recorded.
+      // Currency travels with the patch only while the account is empty;
+      // updateAccount refuses it otherwise, so this cannot silently reinterpret
+      // amounts already recorded.
       await updateAccount(editing.id, {
         name: name.trim(),
         type: accType,
         icon: TYPE_ICONS[accType],
         openingBalanceMinor: openingMinor,
+        ...(entryCount === 0 ? { currency } : {}),
       });
     }
+    // With the currency picker gone from Settings, this screen is now the only
+    // place a currency is chosen — so the reporting currency has to follow it.
+    // Only ever while the ledger is empty; see alignBaseCurrencyToAccounts.
+    await alignBaseCurrencyToAccounts();
     setEditing(null);
     await load();
-  }, [editing, name, accType, currency, opening, load]);
+  }, [editing, name, accType, currency, opening, entryCount, load]);
 
   const toggleArchive = useCallback(
     async (a: Account) => {
@@ -175,7 +191,7 @@ export default function AccountsScreen() {
         </View>
 
         <SectionLabel>{t('accounts.currency')}</SectionLabel>
-        {editing === 'new' ? (
+        {editing === 'new' || entryCount === 0 ? (
           <View style={styles.chips}>
             {Object.keys(CURRENCIES).map((code) => (
               <Chip key={code} label={code} active={currency === code} onPress={() => setCurrency(code)} />

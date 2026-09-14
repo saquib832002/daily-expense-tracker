@@ -12,7 +12,7 @@
  * mark from the surface. That removes an entire class of colour-blindness
  * problems rather than mitigating it.
  */
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View, I18nManager } from 'react-native';
 
 import { niceMax } from '@/domain/report';
 import { radius, space, type, useTheme } from '@/theme';
@@ -201,7 +201,14 @@ export function Meter({
         <View
           style={[
             styles.meterMarker,
-            { left: `${Math.min(100, Math.max(0, paceFraction * 100))}%`, backgroundColor: theme.text },
+            // `start`, not `left`. React Native flips start/end for RTL but
+            // leaves left/right exactly where you put them, so a meter that
+            // fills from the right in Arabic needs its "you are here" marker
+            // measured from the right too.
+            {
+              start: `${Math.min(100, Math.max(0, paceFraction * 100))}%`,
+              backgroundColor: theme.text,
+            },
           ]}
         />
       ) : null}
@@ -317,7 +324,14 @@ const styles = StyleSheet.create({
   rankedHead: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   rankedIcon: { fontSize: 15 },
   rankedLabel: { flex: 1, fontSize: type.small },
-  rankedShare: { fontSize: type.tiny, fontVariant: ['tabular-nums'], minWidth: 30, textAlign: 'right' },
+  // React Native has no textAlign: 'end', and it does not mirror 'right'
+  // either, so the flip has to be asked for by hand.
+  rankedShare: {
+    fontSize: type.tiny,
+    fontVariant: ['tabular-nums'],
+    minWidth: 30,
+    textAlign: I18nManager.isRTL ? 'left' : 'right',
+  },
   rankedAmount: { fontSize: type.small, fontWeight: '600', fontVariant: ['tabular-nums'] },
   rankedTrack: { height: 6, borderRadius: radius.pill, overflow: 'hidden' },
   rankedFill: { height: '100%', borderRadius: radius.pill },

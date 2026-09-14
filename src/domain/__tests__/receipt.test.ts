@@ -1,5 +1,16 @@
 import { describe, expect, it } from '@jest/globals';
-import { findDate, findMerchant, guessCategoryKey, parseReceipt } from '../receipt';
+import {
+  amountCandidates,
+  detectDateOrder,
+  findDate,
+  findMerchant,
+  findMerchantBySize,
+  joinRows,
+  parseReceipt,
+  parseReceiptFromLines,
+  readDate,
+  type PositionedLine,
+} from '../receipt';
 
 const NOW = new Date(2026, 8, 20, 12, 0, 0).getTime(); // 20 Sep 2026
 
@@ -77,6 +88,11 @@ describe('parseReceipt', () => {
       occurredAt: null,
       merchant: null,
       categoryKey: null,
+      categoryFrom: null,
+      categoryEvidence: [],
+      dateAlternative: null,
+      candidates: [],
+      rows: [],
     });
   });
 
@@ -166,35 +182,256 @@ describe('findMerchant', () => {
   });
 });
 
-describe('guessCategoryKey', () => {
-  it('recognises a food delivery bill', () => {
-    expect(parseReceipt(SWIGGY, { now: NOW }).categoryKey).toBe('category.food');
+/**
+ * `guessCategoryKey` was replaced by `guessCategory` in receiptCategory.ts,
+ * which reads the basket as well as the sign above the door. Its cases live in
+ * receiptCategory.test.ts now, and against whole receipts rather than phrases —
+ * the phrases were the reason the old version passed its tests while failing
+ * on paper.
+ */
+
+/* ------------------------------------------------------------------------ */
+/* The row rebuilder — the part that decides whether a real scan works.      */
+/* ------------------------------------------------------------------------ */
+
+/** ML Kit hands back BLOCKS, so labels and amounts arrive separated. */
+const line = (text: string, top: number, left: number, height = 20): PositionedLine => ({
+  text,
+  top,
+  left,
+  width: text.length * 10,
+  height,
+});
+
+describe('joinRows', () => {
+  it('puts a label back with its amount when OCR returned them separately', () => {
+    // This is the shape that broke real scans: the label column is one block,
+    // the amount column another, so the plain text never has them adjacent.
+    const rows = joinRows([
+      line('Sub Total', 300, 40),
+      line('GRAND TOTAL', 360, 40),
+      line('349.00', 302, 400),
+      line('405.46', 361, 400),
+    ]);
+    expect(rows).toEqual(['Sub Total  349.00', 'GRAND TOTAL  405.46']);
   });
 
-  it('recognises a chemist', () => {
-    expect(guessCategoryKey('APOLLO PHARMACY\nParacetamol 500mg')).toBe('category.health');
+  it('orders a row left to right, not in OCR order', () => {
+    expect(joinRows([line('249.00', 100, 400), line('Chicken Biryani', 100, 40)])).toEqual([
+      'Chicken Biryani  249.00',
+    ]);
   });
 
-  it('recognises a petrol pump', () => {
-    expect(guessCategoryKey('INDIAN OIL\nDiesel 20.5 L')).toBe('category.fuel');
+  it('keeps rows apart when they are close but distinct', () => {
+    const rows = joinRows([line('TOTAL', 100, 40), line('CASH', 130, 40)]);
+    expect(rows).toHaveLength(2);
   });
 
-  it('recognises a supermarket', () => {
-    expect(guessCategoryKey('RELIANCE FRESH SUPERMARKET')).toBe('category.groceries');
+  it('tolerates a label and amount printed slightly off each other', () => {
+    expect(joinRows([line('TOTAL', 100, 40), line('432.00', 106, 400)])).toEqual([
+      'TOTAL  432.00',
+    ]);
   });
 
-  it('is case and spacing insensitive', () => {
-    expect(guessCategoryKey('  bigBasket   Super  Market ')).toBe('category.groceries');
+  it('scales its tolerance to the text size, so a big photo behaves like a small one', () => {
+    const big = joinRows([line('TOTAL', 1000, 400, 200), line('432.00', 1060, 4000, 200)]);
+    expect(big).toEqual(['TOTAL  432.00']);
   });
 
-  it('returns null rather than filing a bill under the wrong thing', () => {
-    expect(guessCategoryKey('SHARMA & SONS\nTOTAL 240.00')).toBeNull();
+  it('survives lines with no bounding box at all', () => {
+    expect(joinRows([{ text: 'TOTAL 99.00', top: 0, left: 0, width: 0, height: 0 }])).toEqual([
+      'TOTAL 99.00',
+    ]);
   });
 
-  it('picks the category with the most evidence, not the first word seen', () => {
-    // "coffee" alone would say Food; two grocery words outweigh it.
-    expect(guessCategoryKey('DMART SUPERMARKET\nCoffee 200g\nGrocery bill')).toBe(
-      'category.groceries',
+  it('ignores empty lines', () => {
+    expect(joinRows([line('  ', 10, 10), line('SHOP', 10, 40)])).toEqual(['SHOP']);
+  });
+});
+
+describe('parseReceiptFromLines', () => {
+  it('reads a total that plain text would have got wrong', () => {
+    const r = parseReceiptFromLines(
+      [
+        line('MORE SUPERMARKET', 20, 60, 46),
+        line('Sub Total', 300, 40),
+        line('CGST 9%', 340, 40),
+        line('GRAND TOTAL', 380, 40),
+        line('CASH', 420, 40),
+        line('1180.00', 302, 400),
+        line('106.20', 342, 400),
+        line('1286.20', 381, 400),
+        line('1500.00', 421, 400),
+      ],
+      { now: NOW },
     );
+    expect(r.amountMinor).toBe(128620);
+    expect(r.amountFrom).toBe('total');
+    expect(r.merchant).toBe('MORE SUPERMARKET');
+  });
+
+  it('offers the other figures as alternatives, best first', () => {
+    const r = parseReceiptFromLines(
+      [
+        line('SHOP', 20, 60, 40),
+        line('TOTAL', 200, 40),
+        line('432.00', 201, 400),
+        line('Item one', 120, 40),
+        line('180.00', 121, 400),
+      ],
+      { now: NOW },
+    );
+    expect(r.candidates[0]!.minor).toBe(43200);
+    expect(r.candidates.map((c) => c.minor)).toContain(18000);
+    expect(r.candidates[0]!.row).toContain('TOTAL');
+  });
+});
+
+describe('findMerchantBySize', () => {
+  it('picks the biggest text near the top, not merely the first line', () => {
+    expect(
+      findMerchantBySize([
+        line('Tax Invoice', 10, 40, 16),
+        line('RELIANCE FRESH', 40, 40, 52),
+        line('MG Road, Bengaluru', 110, 40, 16),
+        line('TOTAL', 900, 40, 18),
+      ]),
+    ).toBe('RELIANCE FRESH');
+  });
+
+  it('ignores big text that is obviously paperwork', () => {
+    expect(
+      findMerchantBySize([
+        line('TAX INVOICE', 10, 40, 60),
+        line('SHARMA STORES', 80, 40, 40),
+      ]),
+    ).toBe('SHARMA STORES');
+  });
+
+  it('returns null when nothing near the top looks like a name', () => {
+    expect(findMerchantBySize([line('99.00', 10, 40, 40), line('12345', 60, 40, 40)])).toBeNull();
+  });
+});
+
+describe('amountCandidates', () => {
+  it('never offers a figure from a ruled-out row', () => {
+    const list = amountCandidates(['TOTAL 432.00', 'CASH 1000.00', 'CGST 38.88'], 'INR');
+    expect(list.map((c) => c.minor)).toEqual([43200]);
+  });
+
+  it('deduplicates the same amount printed twice', () => {
+    const list = amountCandidates(['TOTAL 432.00', 'Amount 432.00'], 'INR');
+    expect(list).toHaveLength(1);
+  });
+});
+
+/* ------------------------------------------------------------------------ */
+/* 09/04 is 4 September in Mumbai and 9 April in Boston.                     */
+/* ------------------------------------------------------------------------ */
+
+describe('detectDateOrder', () => {
+  it('reads rupees as an Indian bill', () => {
+    expect(detectDateOrder('TOTAL ₹405.46')).toBe('dmy');
+    expect(detectDateOrder('GSTIN 29AAFCB7383J1ZR')).toBe('dmy');
+    expect(detectDateOrder('CGST 2.5%  8.73')).toBe('dmy');
+  });
+
+  it('reads dollars plus American paperwork as a US bill', () => {
+    expect(detectDateOrder('Subtotal $18.40\nSales Tax $1.61')).toBe('mdy');
+  });
+
+  it('treats a dollar sign as American, since it is only ever a tiebreak now', () => {
+    expect(detectDateOrder('TOTAL $18.40')).toBe('mdy');
+  });
+
+  it('reads pounds and euros as day-first', () => {
+    expect(detectDateOrder('TOTAL £18.40')).toBe('dmy');
+  });
+
+  it('admits when the bill says nothing useful', () => {
+    expect(detectDateOrder('CORNER SHOP\nTOTAL 240.00')).toBeNull();
+  });
+});
+
+describe('readDate', () => {
+  it('picks the recent reading over the old one, whatever the preference', () => {
+    // NOW is 20 Sep 2026. 09/03 is either 3 September (recent) or 9 March
+    // (six months ago). A receipt being photographed is the recent one.
+    for (const preference of [true, false]) {
+      const r = readDate('09/03/2026', NOW, preference)!;
+      expect(new Date(r.at).getMonth()).toBe(8); // September
+      expect(new Date(r.at).getDate()).toBe(3);
+    }
+  });
+
+  it('resolves an Indian receipt the same way, from the other direction', () => {
+    // 03/09 is 3 September day-first, 9 March month-first. Same answer.
+    for (const preference of [true, false]) {
+      const r = readDate('03/09/2026', NOW, preference)!;
+      expect(new Date(r.at).getMonth()).toBe(8);
+      expect(new Date(r.at).getDate()).toBe(3);
+    }
+  });
+
+  it('falls back to the preference when both readings are equally stale', () => {
+    // Both 4 Feb and 2 April are months old, so recency cannot choose.
+    expect(new Date(readDate('02/04/2026', NOW, true)!.at).getDate()).toBe(2);
+    expect(new Date(readDate('02/04/2026', NOW, false)!.at).getDate()).toBe(4);
+  });
+
+  it('offers the other reading when both are possible', () => {
+    // Day-first makes this 2 April; the alternative is 4 February.
+    const r = readDate('02/04/2026', NOW, true)!;
+    expect(new Date(r.at).getMonth()).toBe(3); // April
+    expect(new Date(r.alternative!).getMonth()).toBe(1); // February
+  });
+
+  it('offers nothing when arithmetic settles it', () => {
+    // 18 cannot be a month, so there is only one reading.
+    expect(readDate('18/09/2026', NOW, false)!.alternative).toBeNull();
+  });
+
+  it('offers nothing for a named month', () => {
+    expect(readDate('Sep 18, 2026', NOW, false)!.alternative).toBeNull();
+  });
+});
+
+describe('a US receipt', () => {
+  const US = [
+    'BLUE BOTTLE COFFEE',
+    '1 Ferry Building, San Francisco',
+    'Date 09/03/2026  08:14 AM',
+    'Latte              $5.75',
+    'Croissant          $4.25',
+    'Subtotal          $10.00',
+    'Sales Tax          $0.88',
+    'TOTAL             $10.88',
+  ].join('\n');
+
+  it('reads 09/03 as 3 September on an Indian phone', () => {
+    // The exact case that was still wrong: dollars may not survive OCR, so
+    // recency has to carry it.
+    const r = parseReceipt(US, { now: NOW, dayFirst: true });
+    expect(new Date(r.occurredAt!).getMonth()).toBe(8); // September
+    expect(new Date(r.occurredAt!).getDate()).toBe(3);
+  });
+
+  it('is still right when OCR loses every dollar sign', () => {
+    const stripped = US.replace(/\$/g, '');
+    const r = parseReceipt(stripped, { now: NOW, dayFirst: true });
+    expect(new Date(r.occurredAt!).getMonth()).toBe(8);
+    expect(new Date(r.occurredAt!).getDate()).toBe(3);
+  });
+
+  it('still finds the total', () => {
+    expect(parseReceipt(US, { now: NOW }).amountMinor).toBe(1088);
+  });
+});
+
+describe('an Indian receipt keeps reading day-first', () => {
+  it('even on a phone set to a month-first locale', () => {
+    const r = parseReceipt(SWIGGY, { now: NOW, dayFirst: false });
+    expect(new Date(r.occurredAt!).getDate()).toBe(18);
+    expect(new Date(r.occurredAt!).getMonth()).toBe(8);
   });
 });

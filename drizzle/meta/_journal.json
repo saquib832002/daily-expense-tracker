@@ -8,6 +8,20 @@
       "when": 1787951817650,
       "tag": "0000_curious_virginia_dare",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1789163941180,
+      "tag": "0001_misty_wraith",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789165758682,
+      "tag": "0002_white_amphibian",
+      "breakpoints": true
     }
   ]
 }

@@ -30,3 +30,33 @@ Thumbs.db
 
 # Test
 coverage/
+
+# Archives. Every .tgz in this folder is a delivery tarball from an earlier
+# session — each one is a snapshot of source that is now in the working tree,
+# so committing them would put forty stale copies of the app in the history
+# and never remove them. Git already keeps every version of every file; that
+# is the whole point of it.
+*.tgz
+*.tar
+*.tar.gz
+*.zip
+
+# Diagnostic and build logs written while debugging. Large, machine-specific,
+# and meaningless to anyone else.
+build-log.txt
+diag*.txt
+*.log
+
+# Screenshots and scratch files exchanged during sessions. Worth keeping on
+# disk, not worth carrying in the repository.
+Claude outputs/
+
+# Gradle output inside the local native module. The `/android` rule above is
+# anchored to the repository root, so it does NOT match this one — and Gradle
+# writes paths under it long enough to break `git add` on Windows.
+# The four files worth keeping here are index.ts, expo-module.config.json,
+# android/build.gradle and android/src/**.
+modules/*/android/build/
+modules/*/android/.gradle/
+modules/*/android/.cxx/
+modules/*/android/local.properties

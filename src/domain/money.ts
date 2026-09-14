@@ -10,37 +10,19 @@
  * to test.
  */
 
-export type CurrencyCode = string;
+/**
+ * Currency metadata now comes from ICU rather than from a table in this file —
+ * see `src/domain/currencies.ts` for why, and for the short list that still
+ * keeps a hand-picked grouping locale. Re-exported so every existing call site
+ * keeps working unchanged.
+ */
+import { infoFor, type CurrencyCode } from './currencies';
 
-interface CurrencyInfo {
-  decimals: number;
-  symbol: string;
-  /** Locale used for grouping. India groups as 1,23,456 — not 123,456. */
-  locale: string;
-}
-
-/** Currencies we ship with. Anything unlisted falls back to 2 decimals. */
-export const CURRENCIES: Record<CurrencyCode, CurrencyInfo> = {
-  INR: { decimals: 2, symbol: '₹', locale: 'en-IN' },
-  USD: { decimals: 2, symbol: '$', locale: 'en-US' },
-  EUR: { decimals: 2, symbol: '€', locale: 'de-DE' },
-  GBP: { decimals: 2, symbol: '£', locale: 'en-GB' },
-  AED: { decimals: 2, symbol: 'د.إ', locale: 'ar-AE' },
-  SGD: { decimals: 2, symbol: 'S$', locale: 'en-SG' },
-  AUD: { decimals: 2, symbol: 'A$', locale: 'en-AU' },
-  CAD: { decimals: 2, symbol: 'C$', locale: 'en-CA' },
-  JPY: { decimals: 0, symbol: '¥', locale: 'ja-JP' },
-  KWD: { decimals: 3, symbol: 'د.ك', locale: 'ar-KW' },
-};
-
-const FALLBACK: CurrencyInfo = { decimals: 2, symbol: '', locale: 'en-US' };
-
-export function currencyInfo(code: CurrencyCode): CurrencyInfo {
-  return CURRENCIES[code.toUpperCase()] ?? FALLBACK;
-}
+export { KNOWN_CURRENCIES as CURRENCIES, infoFor as currencyInfo } from './currencies';
+export type { CurrencyCode, CurrencyInfo } from './currencies';
 
 export function decimalsFor(code: CurrencyCode): number {
-  return currencyInfo(code).decimals;
+  return infoFor(code).decimals;
 }
 
 /**
@@ -129,7 +111,7 @@ export function formatMinor(
   currency: CurrencyCode,
   options: FormatOptions = {},
 ): string {
-  const info = currencyInfo(currency);
+  const info = infoFor(currency);
   const locale = options.locale ?? info.locale;
   const value = Number(minorToDecimalString(minor, currency));
 

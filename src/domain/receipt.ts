@@ -17,6 +17,7 @@
  */
 
 import { parseAmountToMinor } from './money';
+import { guessCategory } from './receiptCategory';
 
 export interface ReceiptGuess {
   /** The number as it appeared, for showing next to the field. */
@@ -28,6 +29,46 @@ export interface ReceiptGuess {
   merchant: string | null;
   /** A seeded category key such as `category.food`, or null. */
   categoryKey: string | null;
+  /**
+   * Why that category — the words on the bill that decided it, and whether
+   * they came from the shop's name or from the basket. Shown on the confirm
+   * screen, because a category that appears with no explanation is a category
+   * people stop trusting the moment it is once wrong.
+   */
+  categoryFrom: 'shop' | 'items' | null;
+  categoryEvidence: string[];
+  /**
+   * The other way of reading an ambiguous printed date, e.g. `09/04` as
+   * 9 April when we chose 4 September. Null when the date could only be read
+   * one way — which is most of the time.
+   */
+  dateAlternative: number | null;
+  /**
+   * Every other figure on the bill that could plausibly be the total, best
+   * first. The confirm screen offers these as one-tap alternatives — when the
+   * guess is wrong, being right is a tap away instead of a retype, and that is
+   * what makes a scanner feel reliable rather than clever.
+   */
+  candidates: AmountCandidate[];
+  /** The rows as we rebuilt them. Shown under "what the scan read". */
+  rows: string[];
+}
+
+export interface AmountCandidate {
+  minor: number;
+  /** The number exactly as printed. */
+  text: string;
+  /** The whole row it came from, so the user can see the context. */
+  row: string;
+}
+
+/** One line of OCR output with its position on the image. */
+export interface PositionedLine {
+  text: string;
+  top: number;
+  left: number;
+  width: number;
+  height: number;
 }
 
 /* --------------------------------------------------------------- keywords */
@@ -52,7 +93,19 @@ const TOTAL_RANKS: { rank: number; re: RegExp }[] = [
  * here, which is why this list is checked first and wins outright.
  */
 const NOT_THE_TOTAL =
-  /sub\s*-?\s*total|cash|change|tender|balance|saving|discount|c?gst|igst|vat|(^|[^a-z])tax|round(ing)?\s*off|qty|quantity|item|invoice|gstin|phone|tel|mobile|card|upi|ref|table|token|점|no\.?\s*:/i;
+  /sub\s*-?\s*total|cash|change|tender|balance|saving|discount|c?gst|igst|vat|(^|[^a-z])tax|round(ing)?\s*off|qty|quantity|item|invoice|gstin|phone|tel|mobile|card|upi|ref|table|token|no\.?\s*:/i;
+
+/**
+ * Rows whose numbers are never worth offering, even as an alternative.
+ *
+ * Deliberately narrower than `NOT_THE_TOTAL`. A line item is not the bill
+ * total, but it *is* a sensible thing to tap when the total was misread — so
+ * "Chicken Biryani 249.00" is barred from being the automatic answer and
+ * allowed as a suggestion. What money you handed over and what the taxman
+ * took are never the expense, so those stay out of both.
+ */
+const NEVER_AN_AMOUNT =
+  /cash|change|tender|balance|saving|discount|c?gst|igst|vat|(^|[^a-z])tax|round(ing)?\s*off|invoice|gstin|phone|tel|mobile|no\.?\s*:/i;
 
 /** Lines that are never a shop's name. */
 const NOT_A_NAME =
@@ -122,45 +175,136 @@ function makeDate(y: number, m: number, d: number, now: number): number | null {
 }
 
 /**
- * The first plausible date on the receipt.
+ * Which way round does this receipt print `09/04/2026`?
  *
- * Ambiguous numeric dates are read **day first**, which is what an Indian
- * till prints. When the first number cannot be a day (13/06) it is read the
- * other way round rather than thrown away.
+ * The device's locale tells you how the *user* writes dates, not how the shop
+ * printed them — an Indian phone photographing a Boston coffee receipt gets
+ * this wrong every time. So the receipt is asked first, and the strongest
+ * evidence it carries is the currency it is denominated in.
+ *
+ * Returns null when the bill gives us nothing to go on, and the caller falls
+ * back to the phone's locale.
  */
-export function findDate(text: string, now = Date.now()): number | null {
-  // 2026-03-12
+export function detectDateOrder(text: string): 'dmy' | 'mdy' | null {
+  // Rupees, or any of the Indian tax vocabulary. Unambiguous.
+  if (/₹|(^|\W)rs\.?(\W|$)|(^|\W)inr(\W|$)|gstin|c?gst|sgst|igst/i.test(text)) return 'dmy';
+
+  // Dollars. Australia, Singapore and Canada also print `$` and write the day
+  // first, so this used to require a second American word — but that made the
+  // rule fragile, and it is now only a tiebreak for dates that recency could
+  // not settle. On balance a dollar receipt reaching this app is American.
+  if (/\$\s?\d|sales\s*tax|\bUSD\b/i.test(text)) return 'mdy';
+
+  // Pounds or euros: day first.
+  if (/[£€]\s?\d|(^|\W)(gbp|eur)(\W|$)/i.test(text)) return 'dmy';
+
+  return null;
+}
+
+/**
+ * How recent a receipt has to be for recency to settle an ambiguous date.
+ * Six weeks covers "I photograph my bills at the weekend" and "I am catching
+ * up on last month" without stretching to a date that is genuinely old.
+ */
+const RECENT_MS = 45 * 86400000;
+
+export interface DateReading {
+  /** Our best reading. */
+  at: number;
+  /**
+   * The other way round, when `09/04` could legitimately be either. Null when
+   * the date was unambiguous — a named month, a four-digit year first, or a
+   * number above twelve forcing the order.
+   */
+  alternative: number | null;
+}
+
+/**
+ * The first plausible date on the receipt, and the other reading if there is
+ * one.
+ *
+ * `dayFirst` decides only the genuinely ambiguous case. When one of the two
+ * numbers is above twelve the order is forced by arithmetic and the preference
+ * is ignored.
+ */
+export function readDate(
+  text: string,
+  now = Date.now(),
+  dayFirst = true,
+): DateReading | null {
+  // 2026-03-12 — ISO, never ambiguous.
   for (const m of text.matchAll(/(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})/g)) {
     const at = makeDate(Number(m[1]), Number(m[2]), Number(m[3]), now);
-    if (at !== null) return at;
+    if (at !== null) return { at, alternative: null };
   }
 
-  // 12/03/2026 — day first, unless that is impossible
+  // 12/03/2026 — the interesting case.
   for (const m of text.matchAll(/(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})/g)) {
     const a = Number(m[1]);
     const b = Number(m[2]);
     const y = Number(m[3]);
-    const at = makeDate(y, b, a, now) ?? makeDate(y, a, b, now);
-    if (at !== null) return at;
+
+    const asDayFirst = makeDate(y, b, a, now);
+    const asMonthFirst = makeDate(y, a, b, now);
+
+    // Arithmetic settles it whenever one of the numbers is above twelve.
+    if (asDayFirst === null && asMonthFirst === null) continue;
+    if (asDayFirst === null) return { at: asMonthFirst!, alternative: null };
+    if (asMonthFirst === null) return { at: asDayFirst, alternative: null };
+
+    /*
+     * Both readings are valid dates. The decisive fact is not which country
+     * the shop is in — it is that **people photograph recent receipts**.
+     *
+     * On 9 September, "09/03" is either 3 September (six days ago) or
+     * 9 March (six months ago). One of those is a receipt someone is filing;
+     * the other is not. This resolves an American bill on an Indian phone and
+     * an Indian bill on an American phone, with no country detection at all —
+     * which matters, because detecting the country from OCR text is exactly
+     * the fragile part: a dollar sign is small, faint, and frequently misread.
+     */
+    const dayIsRecent = now - asDayFirst <= RECENT_MS;
+    const monthIsRecent = now - asMonthFirst <= RECENT_MS;
+
+    let at: number;
+    let other: number;
+    if (dayIsRecent !== monthIsRecent) {
+      at = dayIsRecent ? asDayFirst : asMonthFirst;
+      other = dayIsRecent ? asMonthFirst : asDayFirst;
+    } else {
+      // Equally plausible — both recent, or both old. Now the receipt's own
+      // evidence, and failing that the phone's locale, breaks the tie.
+      at = dayFirst ? asDayFirst : asMonthFirst;
+      other = dayFirst ? asMonthFirst : asDayFirst;
+    }
+
+    return { at, alternative: other !== at ? other : null };
   }
 
-  // 12 Jan 2026 / 12-Jan-26
+  // 12 Jan 2026 / 12-Jan-26 — a named month settles it.
   for (const m of text.matchAll(/(\d{1,2})[\s\-.]*([A-Za-z]{3,9})\.?[\s\-,]*(\d{2,4})/g)) {
-    const month = MONTHS[(m[2] ?? '').slice(0, 4).toLowerCase()] ?? MONTHS[(m[2] ?? '').slice(0, 3).toLowerCase()];
+    const month =
+      MONTHS[(m[2] ?? '').slice(0, 4).toLowerCase()] ?? MONTHS[(m[2] ?? '').slice(0, 3).toLowerCase()];
     if (!month) continue;
     const at = makeDate(Number(m[3]), month, Number(m[1]), now);
-    if (at !== null) return at;
+    if (at !== null) return { at, alternative: null };
   }
 
   // Jan 12, 2026
   for (const m of text.matchAll(/([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{2,4})/g)) {
-    const month = MONTHS[(m[1] ?? '').slice(0, 4).toLowerCase()] ?? MONTHS[(m[1] ?? '').slice(0, 3).toLowerCase()];
+    const month =
+      MONTHS[(m[1] ?? '').slice(0, 4).toLowerCase()] ?? MONTHS[(m[1] ?? '').slice(0, 3).toLowerCase()];
     if (!month) continue;
     const at = makeDate(Number(m[3]), month, Number(m[2]), now);
-    if (at !== null) return at;
+    if (at !== null) return { at, alternative: null };
   }
 
   return null;
+}
+
+/** The date alone. Kept because most callers only want the one number. */
+export function findDate(text: string, now = Date.now(), dayFirst = true): number | null {
+  return readDate(text, now, dayFirst)?.at ?? null;
 }
 
 /* --------------------------------------------------------------- merchant */
@@ -193,6 +337,43 @@ interface AmountHit {
   text: string;
   minor: number;
   from: 'total' | 'largest';
+}
+
+/**
+ * Every figure on the bill that could be the total, best first.
+ *
+ * Ranked by how the line describes itself — a row saying GRAND TOTAL beats one
+ * saying TOTAL, which beats an unlabelled number — and within a rank, by size.
+ * Rows we have ruled out entirely (CASH, CHANGE, GST) never appear.
+ */
+export function amountCandidates(rows: string[], currency: string): AmountCandidate[] {
+  const seen = new Map<number, AmountCandidate & { score: number }>();
+
+  rows.forEach((row, index) => {
+    if (NEVER_AN_AMOUNT.test(row)) return;
+    // A row that cannot be the total can still be a useful suggestion, so it
+    // is kept — just ranked below anything that announced itself.
+    const rank = NOT_THE_TOTAL.test(row)
+      ? 0
+      : (TOTAL_RANKS.find((r) => r.re.test(row))?.rank ?? 0);
+
+    for (const text of numbersOn(row)) {
+      const minor = toMinor(text, currency);
+      if (minor == null) continue;
+      // A later row of the same rank wins the tie: receipts print the final
+      // figure last. Bigger amounts win within a row.
+      const score = rank * 1_000_000 + index * 1_000 + Math.min(999, minor / 1000);
+      const previous = seen.get(minor);
+      if (!previous || score > previous.score) {
+        seen.set(minor, { minor, text, row: row.trim(), score });
+      }
+    }
+  });
+
+  return [...seen.values()]
+    .sort((a, b) => b.score - a.score || b.minor - a.minor)
+    .slice(0, 4)
+    .map(({ minor, text, row }) => ({ minor, text, row }));
 }
 
 function findAmount(lines: string[], currency: string): AmountHit | null {
@@ -254,41 +435,107 @@ function findAmount(lines: string[], currency: string): AmountHit | null {
  * Order matters only for ties: the earlier category wins, so the more specific
  * ones come first.
  */
-const CATEGORY_WORDS: { key: string; words: string[] }[] = [
-  { key: 'category.fuel', words: ['petrol', 'diesel', 'fuel', 'indian oil', 'iocl', 'bpcl', 'hpcl', 'bharat petroleum', 'hindustan petroleum', 'filling station', 'पेट्रोल', 'डीज़ल'] },
-  { key: 'category.health', words: ['pharmacy', 'pharma', 'medical', 'medicals', 'chemist', 'hospital', 'clinic', 'diagnostic', 'pathology', 'apollo', 'medplus', 'dentist', 'दवा', 'अस्पताल'] },
-  { key: 'category.groceries', words: ['supermarket', 'super market', 'grocery', 'groceries', 'kirana', 'provision', 'general store', 'dmart', 'd-mart', 'big bazaar', 'bigbasket', 'reliance fresh', 'more retail', 'departmental', 'किराना'] },
-  { key: 'category.food', words: ['restaurant', 'cafe', 'coffee', 'swiggy', 'zomato', 'pizza', 'burger', 'biryani', 'bakery', 'sweets', 'mithai', 'dhaba', 'food court', 'kitchen', 'eatery', 'tiffin', 'canteen', 'रेस्टोरेंट', 'कैफ़े'] },
-  { key: 'category.transport', words: ['uber', 'ola cabs', 'rapido', 'taxi', 'cab ', 'metro rail', 'irctc', 'railway', 'toll plaza', 'fastag', 'parking', 'rickshaw', 'ऑटो'] },
-  { key: 'category.travel', words: ['airlines', 'indigo', 'spicejet', 'air india', 'makemytrip', 'goibibo', 'oyo', 'resort', 'tourism', 'travels'] },
-  { key: 'category.entertainment', words: ['cinema', 'pvr', 'inox', 'multiplex', 'bookmyshow', 'netflix', 'spotify', 'movie'] },
-  { key: 'category.phone', words: ['airtel', 'jio', 'vodafone', 'bsnl', 'recharge', 'prepaid', 'postpaid'] },
-  { key: 'category.utilities', words: ['electricity', 'water bill', 'gas bill', 'broadband', 'bescom', 'bses', 'power corporation'] },
-  { key: 'category.education', words: ['school', 'college', 'tuition', 'academy', 'stationery', 'book store', 'bookstore', 'institute'] },
-  { key: 'category.personal', words: ['salon', 'spa', 'barber', 'parlour', 'parlor', 'beauty'] },
-  { key: 'category.household', words: ['hardware', 'plumbing', 'furniture', 'paints', 'sanitary'] },
-  { key: 'category.shopping', words: ['amazon', 'flipkart', 'myntra', 'apparel', 'garment', 'footwear', 'fashion', 'lifestyle', 'textiles', 'saree', 'boutique', 'readymade'] },
-];
+/**
+ * Category guessing moved to `src/domain/receiptCategory.ts`.
+ *
+ * What used to be here searched the whole receipt as one lowercase blob against
+ * a list of shop names, and took whichever category matched the most words. It
+ * could recognise a chain and nothing else: a bill headed SHRI BALAJI STORES
+ * listing atta, dal, milk and sugar matched none of its vocabulary, because the
+ * app had no words for groceries — only words for grocers. It also let a shop's
+ * footer address vote, and let a single incidental word win outright.
+ */
+
+/* ------------------------------------------------------------------- rows */
 
 /**
- * The most likely category, or null.
+ * Rebuild the rows as they are printed on the paper.
  *
- * Null is a perfectly good answer and is returned often — the confirm screen
- * simply leaves the category unchosen, which is a two-second tap, rather than
- * filing a chemist's bill under Entertainment because one word matched.
+ * This is the single most important function in the file. ML Kit returns
+ * *blocks* of text, and on a receipt the column of labels and the column of
+ * amounts are usually two different blocks — so the plain text arrives with
+ * every label separated from its number. Reading "TOTAL" and "405.46" as one
+ * row is only possible from the bounding boxes.
+ *
+ * Lines belong to the same row when they overlap vertically. The tolerance is
+ * derived from the text's own height rather than fixed in pixels, so it works
+ * on a 12-megapixel photo and a cropped thumbnail alike.
  */
-export function guessCategoryKey(text: string): string | null {
-  const haystack = ` ${text.toLowerCase().replace(/\s+/g, ' ')} `;
+export function joinRows(lines: PositionedLine[]): string[] {
+  const usable = lines.filter((l) => l.text.trim().length > 0);
+  if (usable.length === 0) return [];
 
-  let best: { key: string; hits: number } | null = null;
-  for (const { key, words } of CATEGORY_WORDS) {
-    let hits = 0;
-    for (const word of words) {
-      if (haystack.includes(word.toLowerCase())) hits++;
+  const heights = usable.map((l) => l.height).sort((a, b) => a - b);
+  const medianHeight = heights[Math.floor(heights.length / 2)] ?? 20;
+  // Half a line of text: enough to catch a label and an amount printed
+  // slightly off each other, tight enough not to merge adjacent rows.
+  const tolerance = Math.max(4, medianHeight * 0.5);
+
+  const sorted = [...usable].sort((a, b) => a.top - b.top || a.left - b.left);
+  const rows: PositionedLine[][] = [];
+
+  for (const line of sorted) {
+    const centre = line.top + line.height / 2;
+    const current = rows[rows.length - 1];
+
+    if (current && current.length > 0) {
+      const first = current[0]!;
+      const rowCentre = first.top + first.height / 2;
+      if (Math.abs(centre - rowCentre) <= tolerance) {
+        current.push(line);
+        continue;
+      }
     }
-    if (hits > 0 && (!best || hits > best.hits)) best = { key, hits };
+    rows.push([line]);
   }
-  return best?.key ?? null;
+
+  return rows.map((row) =>
+    row
+      .sort((a, b) => a.left - b.left)
+      .map((l) => l.text.trim())
+      .join('  ')
+      .replace(/\s{3,}/g, '  ')
+      .trim(),
+  );
+}
+
+/**
+ * The shop name, using how big the text is.
+ *
+ * A till receipt prints its name larger than everything else, near the top.
+ * That is far more reliable than "the first line with some letters in it",
+ * which picks up addresses, slogans and GST numbers.
+ */
+export function findMerchantBySize(lines: PositionedLine[]): string | null {
+  const usable = lines.filter((l) => l.text.trim().length >= 3 && l.height > 0);
+  if (usable.length === 0) return null;
+
+  const byPosition = [...usable].sort((a, b) => a.top - b.top);
+  const top = byPosition[0]!.top;
+  const bottom = Math.max(...usable.map((l) => l.top + l.height));
+
+  // The name lives in the masthead — beyond the first third we are into the
+  // address, the bill number and the items. On a long receipt that fraction
+  // is the right rule; on a short one it can exclude everything, so the first
+  // six lines always qualify regardless.
+  const cutoff = top + (bottom - top) * 0.35;
+  const alwaysEligible = new Set(byPosition.slice(0, 6));
+
+  const candidates = usable
+    .filter((l) => l.top <= cutoff || alwaysEligible.has(l))
+    .map((l) => ({ line: l, text: l.text.replace(/\s+/g, ' ').trim() }))
+    .filter(({ text }) => {
+      if (text.length > 40) return false;
+      const letters = text.replace(/[^A-Za-z\u0900-\u097F]/g, '').length;
+      if (letters < 3) return false;
+      if (letters < text.replace(/\s/g, '').length * 0.5) return false;
+      if (NOT_A_NAME.test(text)) return false;
+      return true;
+    })
+    .sort((a, b) => b.line.height - a.line.height);
+
+  const best = candidates[0];
+  return best ? best.text.replace(/[.,:;\-\u2013\u2014|]+$/, '').trim() : null;
 }
 
 /* ------------------------------------------------------------------- main */
@@ -297,37 +544,91 @@ export function guessCategoryKey(text: string): string | null {
  * Everything we can work out from one receipt.
  * Any field may be null; the confirm screen shows blanks, never guesses.
  */
-export function parseReceipt(
-  text: string,
-  options: { currency?: string; now?: number } = {},
+const EMPTY: ReceiptGuess = {
+  amountText: null,
+  amountMinor: null,
+  amountFrom: null,
+  occurredAt: null,
+  merchant: null,
+  categoryKey: null,
+  categoryFrom: null,
+  categoryEvidence: [],
+  dateAlternative: null,
+  candidates: [],
+  rows: [],
+};
+
+export interface ParseOptions {
+  currency?: string;
+  now?: number;
+  /**
+   * How the user's own locale writes dates. Used only when the receipt gives
+   * no clue of its own, and only for genuinely ambiguous dates.
+   */
+  dayFirst?: boolean;
+}
+
+function parseRows(
+  rows: string[],
+  options: ParseOptions,
+  merchant: string | null,
 ): ReceiptGuess {
+  if (rows.length === 0) return { ...EMPTY };
+
   const currency = options.currency ?? 'INR';
   const now = options.now ?? Date.now();
+  const joined = rows.join('\n');
 
-  const lines = text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
+  // The receipt's own evidence beats the phone's locale, because the question
+  // is how the SHOP printed the date, not how the reader writes one.
+  const order = detectDateOrder(joined);
+  const dayFirst = order !== null ? order === 'dmy' : (options.dayFirst ?? true);
 
-  if (lines.length === 0) {
-    return {
-      amountText: null,
-      amountMinor: null,
-      amountFrom: null,
-      occurredAt: null,
-      merchant: null,
-      categoryKey: null,
-    };
-  }
+  const amount = findAmount(rows, currency);
+  const date = readDate(joined, now, dayFirst);
 
-  const amount = findAmount(lines, currency);
+  // The categoriser wants the rows, not the flattened text: it reads the
+  // masthead and the basket as separate evidence, and that distinction is
+  // exactly what a single joined string throws away.
+  const resolvedMerchant = merchant ?? findMerchant(rows);
+  const category = guessCategory(rows, resolvedMerchant);
 
   return {
     amountText: amount?.text ?? null,
     amountMinor: amount?.minor ?? null,
     amountFrom: amount?.from ?? null,
-    occurredAt: findDate(text, now),
-    merchant: findMerchant(lines),
-    categoryKey: guessCategoryKey(text),
+    occurredAt: date?.at ?? null,
+    dateAlternative: date?.alternative ?? null,
+    merchant: resolvedMerchant,
+    categoryKey: category.key,
+    categoryFrom: category.from,
+    categoryEvidence: category.evidence,
+    candidates: amountCandidates(rows, currency),
+    rows,
   };
+}
+
+/**
+ * Everything we can work out from one receipt, given plain text.
+ * Any field may be null; the confirm screen shows blanks, never guesses.
+ */
+export function parseReceipt(text: string, options: ParseOptions = {}): ReceiptGuess {
+  const rows = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  return parseRows(rows, options, null);
+}
+
+/**
+ * The same, from OCR output that still has its bounding boxes — which is
+ * always better, because the rows can be rebuilt as printed rather than as
+ * ML Kit happened to concatenate them.
+ */
+export function parseReceiptFromLines(
+  lines: PositionedLine[],
+  options: ParseOptions = {},
+): ReceiptGuess {
+  return parseRows(joinRows(lines), options, findMerchantBySize(lines));
 }

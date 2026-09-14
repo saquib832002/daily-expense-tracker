@@ -1,6 +1,8 @@
 import { describe, expect, it } from '@jest/globals';
 import {
+  intervalDaysFor,
   isBackupDue,
+  nextBackupAt,
   snapshotName,
   snapshotTime,
   snapshotsToPrune,
@@ -95,5 +97,53 @@ describe('sortSnapshots', () => {
     ]);
     expect(out).toHaveLength(2);
     expect(out[0]!.at).toBeGreaterThan(out[1]!.at);
+  });
+});
+
+describe('frequency', () => {
+  it('maps each choice to a number of days', () => {
+    expect(intervalDaysFor('daily')).toBe(1);
+    expect(intervalDaysFor('weekly')).toBe(7);
+    expect(intervalDaysFor('off')).toBe(0);
+  });
+
+  it('schedules the next backup a whole number of days on', () => {
+    const last = at(2026, 8, 15, 21, 30);
+    const next = nextBackupAt(last, 'weekly', at(2026, 8, 16))!;
+    expect(new Date(next).getDate()).toBe(22);
+    // Anchored to the start of the day, so a 9pm backup does not push next
+    // week's later and later.
+    expect(new Date(next).getHours()).toBe(0);
+  });
+
+  it('says "now" when nothing has ever been backed up', () => {
+    const now = at(2026, 8, 16);
+    expect(nextBackupAt(null, 'daily', now)).toBe(now);
+  });
+
+  it('schedules nothing when switched off', () => {
+    expect(nextBackupAt(at(2026, 8, 15), 'off', at(2026, 8, 16))).toBeNull();
+  });
+});
+
+describe('snapshot names with an extension', () => {
+  it('round-trips a zip name', () => {
+    const when = at(2026, 8, 15, 21, 5);
+    expect(snapshotTime(snapshotName(when, 'zip'))).toBe(when);
+  });
+
+  it('can be told to look at only one kind', () => {
+    const zip = snapshotName(at(2026, 8, 15), 'zip');
+    expect(snapshotTime(zip, 'json')).toBeNull();
+    expect(snapshotTime(zip, 'zip')).not.toBeNull();
+  });
+
+  it('prunes zips without touching the json snapshots beside them', () => {
+    const names = [
+      snapshotName(at(2026, 8, 1), 'zip'),
+      snapshotName(at(2026, 8, 8), 'zip'),
+      snapshotName(at(2026, 8, 15), 'json'),
+    ];
+    expect(snapshotsToPrune(names, 1, 'zip')).toEqual([snapshotName(at(2026, 8, 1), 'zip')]);
   });
 });

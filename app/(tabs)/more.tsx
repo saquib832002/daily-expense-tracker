@@ -228,6 +228,13 @@ export default function MoreScreen() {
           onPress={() => router.push('/convert')}
         />
         <ListRow
+          icon="📄"
+          title={t('more.statement')}
+          subtitle={t('more.statementHint')}
+          chevron
+          onPress={() => router.push('/statement')}
+        />
+        <ListRow
           icon="🛡️"
           title={t('more.warranties')}
           subtitle={t('more.warrantiesHint')}

@@ -1,10 +1,16 @@
 import { and, desc, eq, gte, isNotNull, isNull, lt, ne, sql } from 'drizzle-orm';
 import { randomUUID } from 'expo-crypto';
 
+import {
+  defaultYearStartMonth,
+  normalizeYearStartMonth,
+  type YearStartMonth,
+} from '@/domain/fiscalYear';
 import { normalizeMerchant } from '@/domain/merchant';
 import { nextOccurrence, occurrencesBetween, parseRRule } from '@/domain/recurrence';
 import { rescaleMinor, sameScale } from '@/domain/rebase';
 import { applyRules } from '@/domain/rules';
+import { deviceRegion } from '@/services/region';
 
 import { db } from './client';
 import {
@@ -198,6 +204,30 @@ export async function getFirstDayOfMonth(): Promise<number> {
   const raw = await getSetting('first_day_of_month');
   const n = Number(raw ?? 1);
   return Number.isFinite(n) ? n : 1;
+}
+
+/**
+ * Which month the financial year starts in.
+ *
+ * Unset means "never chosen", not "January" — so the fallback comes from the
+ * device's region rather than from a constant. An Indian phone that installed
+ * this app before the setting existed should open its first annual summary on
+ * April–March without being told to go and find a switch.
+ *
+ * This is the one place `db/` reaches into `services/`. The alternative was to
+ * write the default during onboarding, which would have been tidier and would
+ * have left every existing install on January — a wrong answer, tidily
+ * arranged. `services/region` only reads the OS locale and touches no
+ * database, so there is no cycle.
+ */
+export async function getYearStartMonth(): Promise<YearStartMonth> {
+  const raw = await getSetting('year_start_month');
+  if (raw === null) return defaultYearStartMonth(deviceRegion().code);
+  return normalizeYearStartMonth(raw);
+}
+
+export async function setYearStartMonth(month: YearStartMonth): Promise<void> {
+  await setSetting('year_start_month', String(normalizeYearStartMonth(month)));
 }
 
 /* ---------------------------------------------------------------- accounts */

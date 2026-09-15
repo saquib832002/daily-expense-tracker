@@ -214,6 +214,7 @@ export default function RootLayout() {
         <Stack.Screen name="warranties" />
         <Stack.Screen name="cards" />
         <Stack.Screen name="convert" />
+        <Stack.Screen name="statement" />
         <Stack.Screen name="scan" />
       </Stack>
       </LockGate>

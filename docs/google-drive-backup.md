@@ -106,10 +106,29 @@ Copy the **SHA1** line from each.
 **Do not skip this one:** if you use Play App Signing (and you should — it is
 how you recover from a lost keystore), Google re-signs your app with *their*
 key, so the fingerprint on a user's phone is not your release key's. After your
-first upload, take the SHA-1 from **Play Console → Setup → App signing** and
+first upload, take the SHA-1 of the **app signing key** from Play Console and
 create an Android OAuth client for that too. Miss it and Drive will work
 perfectly in every build you test and fail for every real user, which is the
-worst-shaped bug there is.
+worst-shaped bug there is — and the error it produces, *"this copy of the app
+was signed with a key that is not recognized"*, names the cause without
+naming the fix.
+
+Play Console moved this page. As of 2026 it is:
+
+> **Protected with Play → Play Store distribution → Go to Play app signing**
+
+The older **Release → Setup → App integrity** path is what Google's own
+developer documentation still tells you, and it may still work; if it does not,
+use the one above. Both land on a page with two blocks — **App signing key
+certificate** and **Upload key certificate**. You want the first one, and if it
+lists more than one certificate, register an OAuth client for every SHA-1 it
+shows: Google has begun issuing additional app signing certificates for
+post-quantum readiness, and a phone may be served by any of them.
+
+Adding a client takes effect for apps that are **already installed** — an
+Android OAuth client is matched by package name and fingerprint at the moment
+of the request, so there is nothing to rebuild and nothing to re-upload. Allow
+a few minutes for it to propagate, then clear the app's data and sign in again.
 
 There is no client ID to paste into the app. Android OAuth clients are matched
 by package name and signature at request time, which is why there is no secret

@@ -39,8 +39,16 @@ import {
   shareText,
   suggestedName,
 } from '@/services/files';
+import {
+  disableEncryption,
+  isEncryptionOn,
+  needsPassphrase,
+  setPassphrase as setPassphrase_,
+  unlockWithPassphrase,
+} from '@/services/vault';
+import { judgePassphrase } from '@/domain/vault';
 import { radius, space, type, useTheme } from '@/theme';
-import { Button, Card, Chip, EmptyState, ListRow, RowGroup, Screen, SectionLabel } from '@/ui';
+import { Button, Card, Chip, EmptyState, Field, ListRow, RowGroup, Screen, SectionLabel } from '@/ui';
 
 const FREQUENCIES: BackupFrequency[] = ['off', 'daily', 'weekly'];
 
@@ -589,6 +597,9 @@ export default function BackupScreen() {
         <Text style={[styles.caveat, { color: theme.textDim }]}>{t('backup.csvCaveat')}</Text>
       </Card>
 
+      {/* Locking the archive -------------------------------------------- */}
+      <EncryptionCard onChanged={() => void refresh()} busy={working} />
+
       {/* Bringing it back ---------------------------------------------- */}
       <Card>
         <SectionLabel>{t('backup.layerRestore')}</SectionLabel>
@@ -713,3 +724,207 @@ const styles = StyleSheet.create({
   busy: { flexDirection: 'row', alignItems: 'center', gap: space.md, justifyContent: 'center' },
   message: { borderRadius: radius.md, padding: space.md },
 });
+
+/**
+ * Passphrase-protecting the archive.
+ *
+ * Its own component because it is the only part of this screen that holds a
+ * secret, and keeping that state in one place — where it is visibly cleared
+ * after use — is worth more than saving a file.
+ *
+ * The copy here does the real work. Encryption with no recovery path is a
+ * trade, and the user has to understand both halves before they take it: the
+ * Drive copy becomes unreadable to anyone who gets into their Google account,
+ * and it becomes unreadable to *them* if they forget the passphrase. Burying
+ * either half would be dishonest.
+ */
+function EncryptionCard({ onChanged, busy }: { onChanged: () => void; busy: boolean }) {
+  const theme = useTheme();
+  const [on, setOn] = useState<boolean | null>(null);
+  const [locked, setLocked] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [passphrase, setPassphrase] = useState('');
+  const [again, setAgain] = useState('');
+  const [note, setNote] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const read = useCallback(async () => {
+    setOn(await isEncryptionOn());
+    setLocked(await needsPassphrase());
+  }, []);
+
+  useEffect(() => {
+    void read();
+  }, [read]);
+
+  /** Clear the secret from state the moment it is no longer needed. */
+  const close = useCallback(() => {
+    setPassphrase('');
+    setAgain('');
+    setEditing(false);
+  }, []);
+
+  const verdict = judgePassphrase(passphrase);
+  const matches = passphrase.length > 0 && passphrase === again;
+  const canSave = verdict !== 'tooShort' && matches && !saving;
+
+  const save = useCallback(async () => {
+    setSaving(true);
+    try {
+      const result = await setPassphrase_(passphrase);
+      if (!result.ok) {
+        setNote(result.error === 'tooShort' ? t('vault.tooShort') : t('vault.keystoreFailed'));
+        return;
+      }
+      setNote(t('vault.turnedOn'));
+      close();
+      await read();
+      onChanged();
+    } finally {
+      setSaving(false);
+    }
+  }, [passphrase, close, read, onChanged]);
+
+  const unlock = useCallback(async () => {
+    setSaving(true);
+    try {
+      const ok = await unlockWithPassphrase(passphrase);
+      setNote(ok ? t('vault.unlocked') : t('vault.wrongPassphrase'));
+      if (ok) {
+        close();
+        await read();
+        onChanged();
+      }
+    } finally {
+      setSaving(false);
+    }
+  }, [passphrase, close, read, onChanged]);
+
+  const turnOff = useCallback(() => {
+    Alert.alert(t('vault.turnOffTitle'), t('vault.turnOffBody'), [
+      { text: t('common.cancel'), style: 'cancel' },
+      {
+        text: t('vault.turnOffConfirm'),
+        style: 'destructive',
+        onPress: () => {
+          void (async () => {
+            await disableEncryption();
+            setNote(t('vault.turnedOff'));
+            await read();
+            onChanged();
+          })();
+        },
+      },
+    ]);
+  }, [read, onChanged]);
+
+  if (on === null) return null;
+
+  return (
+    <Card>
+      <SectionLabel>{t('vault.section')}</SectionLabel>
+
+      {locked ? (
+        <>
+          <Text style={[styles.caveat, { color: theme.warn }]}>{t('vault.lockedOut')}</Text>
+          <Field
+            label={t('vault.passphrase')}
+            value={passphrase}
+            onChangeText={setPassphrase}
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <Button
+            label={saving ? t('vault.checking') : t('vault.unlock')}
+            onPress={() => void unlock()}
+            disabled={saving || passphrase.length === 0}
+          />
+        </>
+      ) : on ? (
+        <>
+          <Text style={[styles.body, { color: theme.income }]}>{t('vault.isOn')}</Text>
+          <Text style={[styles.caveat, { color: theme.textDim }]}>{t('vault.scope')}</Text>
+          {editing ? null : (
+            <>
+              <Button
+                label={t('vault.change')}
+                variant="secondary"
+                onPress={() => setEditing(true)}
+                disabled={busy}
+              />
+              <Button
+                label={t('vault.turnOff')}
+                variant="secondary"
+                onPress={turnOff}
+                disabled={busy}
+              />
+            </>
+          )}
+        </>
+      ) : (
+        <>
+          <Text style={[styles.body, { color: theme.textDim }]}>{t('vault.pitch')}</Text>
+          <Text style={[styles.caveat, { color: theme.warn }]}>{t('vault.noRecovery')}</Text>
+          <Text style={[styles.caveat, { color: theme.textDim }]}>{t('vault.scope')}</Text>
+          {editing ? null : (
+            <Button
+              label={t('vault.turnOn')}
+              variant="secondary"
+              onPress={() => setEditing(true)}
+              disabled={busy}
+            />
+          )}
+        </>
+      )}
+
+      {editing ? (
+        <>
+          <Field
+            label={t('vault.passphrase')}
+            value={passphrase}
+            onChangeText={setPassphrase}
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <Field
+            label={t('vault.passphraseAgain')}
+            value={again}
+            onChangeText={setAgain}
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <Text
+            style={[
+              styles.caveat,
+              {
+                color:
+                  verdict === 'tooShort' || verdict === 'weak'
+                    ? theme.warn
+                    : verdict === 'strong'
+                      ? theme.income
+                      : theme.textDim,
+              },
+            ]}
+          >
+            {t(`vault.strength.${verdict}`)}
+          </Text>
+          {again.length > 0 && !matches ? (
+            <Text style={[styles.caveat, { color: theme.danger }]}>{t('vault.mismatch')}</Text>
+          ) : null}
+          {on ? <Text style={[styles.caveat, { color: theme.textDim }]}>{t('vault.changeCaveat')}</Text> : null}
+          <Button
+            label={saving ? t('vault.saving') : t('vault.save')}
+            onPress={() => void save()}
+            disabled={!canSave}
+          />
+          <Button label={t('common.cancel')} variant="secondary" onPress={close} />
+        </>
+      ) : null}
+
+      {note ? <Text style={[styles.caveat, { color: theme.textDim }]}>{note}</Text> : null}
+    </Card>
+  );
+}

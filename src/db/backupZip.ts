@@ -13,11 +13,13 @@
 import JSZip from 'jszip';
 import * as FileSystem from 'expo-file-system';
 
+import { fromBase64, toBase64 as bytesToBase64 } from '@/domain/vault';
 import {
   listReceiptFiles,
   readReceiptAsBase64,
   writeReceiptFromBase64,
 } from '@/services/receipts';
+import { looksEncrypted, maybeSeal, unseal } from '@/services/vault';
 
 import { buildBackup, restoreBackup, type RestoreResult } from './backup';
 
@@ -34,7 +36,7 @@ export const ZIP_RECEIPTS = 'receipts/';
 export async function buildBackupZip(
   filename: string,
   appVersion?: string,
-): Promise<{ uri: string; receipts: number }> {
+): Promise<{ uri: string; receipts: number; encrypted: boolean }> {
   const zip = new JSZip();
   zip.file(ZIP_JSON, await buildBackup(appVersion));
 
@@ -47,21 +49,37 @@ export async function buildBackupZip(
     }
   }
 
-  const base64 = await zip.generateAsync({
-    type: 'base64',
+  // Bytes rather than base64, because the encryption path needs bytes and
+  // asking JSZip for base64 only to decode it again would double the peak
+  // memory on exactly the archives that are already the largest.
+  const bytes = (await zip.generateAsync({
+    type: 'uint8array',
     compression: 'DEFLATE',
     // JPEGs are already compressed; level 1 is the honest trade here, spending
     // a second rather than a minute for a percent or two.
     compressionOptions: { level: 1 },
-  });
+  })) as Uint8Array;
 
   const uri = `${FileSystem.cacheDirectory}${filename}`;
   await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
-  await FileSystem.writeAsStringAsync(uri, base64, {
+
+  // If a passphrase is set, what lands on disk — and therefore in Drive — is
+  // the encrypted container, not the ZIP. The file keeps the same name and
+  // extension deliberately: it is still the user's backup, and renaming it
+  // would only mean the one they find in Drive a year later looks unfamiliar.
+  const sealed = await maybeSeal(bytes);
+  if (sealed.encrypted) {
+    await FileSystem.writeAsStringAsync(uri, sealed.text, {
+      encoding: FileSystem.EncodingType.UTF8,
+    });
+    return { uri, receipts: names.length, encrypted: true };
+  }
+
+  await FileSystem.writeAsStringAsync(uri, bytesToBase64(sealed.bytes), {
     encoding: FileSystem.EncodingType.Base64,
   });
 
-  return { uri, receipts: names.length };
+  return { uri, receipts: names.length, encrypted: false };
 }
 
 export interface ZipRestoreResult extends RestoreResult {
@@ -75,13 +93,30 @@ export interface ZipRestoreResult extends RestoreResult {
  * fail halfway through you still have your ledger, and a missing photo is a
  * missing photo rather than a missing month.
  */
-export async function restoreBackupZip(uri: string): Promise<ZipRestoreResult> {
+export async function restoreBackupZip(
+  uri: string,
+  /** Only needed for an encrypted archive on a phone that lacks the key. */
+  passphrase?: string,
+): Promise<ZipRestoreResult> {
   let zip: JSZip;
   try {
+    // Read as base64 whatever the file turns out to be: an encrypted container
+    // is text and a ZIP is not, and reading a ZIP as UTF-8 mangles it. Base64
+    // is the one encoding that survives both, and the first few decoded bytes
+    // say which one this is.
     const base64 = await FileSystem.readAsStringAsync(uri, {
       encoding: FileSystem.EncodingType.Base64,
     });
-    zip = await JSZip.loadAsync(base64, { base64: true });
+
+    const prefix = new TextDecoder().decode(fromBase64(base64.slice(0, 64)));
+    if (looksEncrypted(prefix)) {
+      const container = new TextDecoder().decode(fromBase64(base64));
+      const opened = await unseal(container, passphrase);
+      if (!opened.ok) return { ok: false, error: opened.error };
+      zip = await JSZip.loadAsync(opened.bytes);
+    } else {
+      zip = await JSZip.loadAsync(base64, { base64: true });
+    }
   } catch {
     return { ok: false, error: 'notZip' };
   }

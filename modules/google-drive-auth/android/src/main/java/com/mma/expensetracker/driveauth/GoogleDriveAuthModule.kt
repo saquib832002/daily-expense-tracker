@@ -77,6 +77,32 @@ class GoogleDriveAuthModule : Module() {
     }
 
     /**
+     * Open the Google Picker so the user can hand this app one specific file
+     * that somebody else owns.
+     *
+     * This is the only way `drive.file` ever reaches a file this app did not
+     * create. The scope grants access to files the app creates *or* that "the
+     * user shares with an app while using the Google Picker API" — and that
+     * second half includes modifying them, which is what makes office mode
+     * possible at all: the owner creates a file in their own Drive, shares it
+     * with a staff member as a writer, and the staff member's copy of the app
+     * picks it once and can append to it forever.
+     *
+     * Implemented as a resource parameter on the ordinary authorization
+     * request rather than as a separate API. Google added
+     * `PICKER_OAUTH_TRIGGER` in play-services-auth **21.6.0**; anything older
+     * will not compile, which is the good kind of failure.
+     *
+     * Note `setOptOutIncludingGrantedScopes(true)`: without it, an account
+     * that has already granted `drive.file` gets a token straight back and the
+     * picker never appears — there would be nothing to resolve, so nothing to
+     * show. The whole point here is to force the UI.
+     */
+    AsyncFunction("pickFiles") { options: Map<String, Any?>, promise: Promise ->
+      pick(options, promise)
+    }
+
+    /**
      * How this exact build identifies itself to Google.
      *
      * The single most common reason Drive sign-in fails is that the SHA-1 in
@@ -172,6 +198,111 @@ class GoogleDriveAuthModule : Module() {
   }
 
   /**
+   * The picker variant of `request`.
+   *
+   * Deliberately a separate function rather than a flag on `request`: the
+   * picker always needs UI, always forces consent, and always carries resource
+   * parameters, so folding it into the silent/interactive path would mean
+   * three conditionals in a function whose whole job is to be readable.
+   */
+  private fun pick(options: Map<String, Any?>, promise: Promise) {
+    if (pending != null) {
+      promise.reject(CodedException("E_IN_PROGRESS", "A sign-in is already open", null))
+      return
+    }
+
+    val builder = AuthorizationRequest.builder()
+      .setRequestedScopes(listOf(Scope(DRIVE_FILE_SCOPE)))
+      // Force the UI. See the note on the AsyncFunction above.
+      .setOptOutIncludingGrantedScopes(true)
+      .setPrompt(AuthorizationRequest.Prompt.CONSENT or AuthorizationRequest.Prompt.SELECT_ACCOUNT)
+      .addResourceParameter(AuthorizationRequest.ResourceParameter.PICKER_OAUTH_TRIGGER, "true")
+
+    if (options["allowMultiple"] == true) {
+      builder.addResourceParameter(AuthorizationRequest.ResourceParameter.PICKER_ALLOW_MULTIPLE, "true")
+    }
+    (options["mimeTypes"] as? String)?.takeIf { it.isNotBlank() }?.let {
+      builder.addResourceParameter(AuthorizationRequest.ResourceParameter.PICKER_MIMETYPES, it)
+    }
+    // Narrowing to the exact files the employer shared turns "find the right
+    // one among four hundred" into "tap the one thing on the screen".
+    (options["fileIds"] as? String)?.takeIf { it.isNotBlank() }?.let {
+      builder.addResourceParameter(AuthorizationRequest.ResourceParameter.PICKER_FILE_IDS, it)
+    }
+    if (options["allowFolders"] == true) {
+      builder.addResourceParameter(
+        AuthorizationRequest.ResourceParameter.PICKER_ALLOW_FOLDER_SELECTION, "true"
+      )
+    }
+
+    Identity.getAuthorizationClient(activity)
+      .authorize(builder.build())
+      .addOnSuccessListener { result ->
+        if (!result.hasResolution()) {
+          // No UI to show. With optOutIncludingGrantedScopes set this should
+          // not happen, and if it does there are no picked files, so say so
+          // rather than reporting a success with nothing in it.
+          promise.resolve(
+            outcome("failed", message = "Google returned no picker to show")
+          )
+          return@addOnSuccessListener
+        }
+
+        val intent = result.pendingIntent
+        if (intent == null) {
+          promise.resolve(outcome("failed", message = "Picker needed but not offered"))
+          return@addOnSuccessListener
+        }
+
+        pending = promise
+        try {
+          activity.startIntentSenderForResult(
+            intent.intentSender, REQUEST_CODE, null, 0, 0, 0, null
+          )
+        } catch (e: Throwable) {
+          pending = null
+          promise.resolve(
+            outcome("failed", message = e.message ?: "Could not open the picker")
+          )
+        }
+      }
+      .addOnFailureListener { e ->
+        promise.resolve(
+          outcome(
+            "failed",
+            code = (e as? ApiException)?.statusCode,
+            message = e.message ?: "Google refused the picker request"
+          )
+        )
+      }
+  }
+
+  /**
+   * Pull the picked file ids out of the authorization result.
+   *
+   * Google documents the value as arriving in `getTokenResponseParams()` under
+   * `picked_file_ids`, and the web flow delivers it as a comma-separated
+   * string. Both shapes are handled because a Bundle can legitimately carry
+   * either, and guessing wrong would mean a join flow that silently picks
+   * nothing.
+   */
+  private fun pickedFileIds(result: AuthorizationResult): List<String> {
+    val params = try {
+      result.tokenResponseParams
+    } catch (e: Throwable) {
+      null
+    } ?: return emptyList()
+
+    params.getStringArrayList(PICKED_FILE_IDS)?.let { return it.filter { id -> id.isNotBlank() } }
+
+    return params.getString(PICKED_FILE_IDS)
+      ?.split(',')
+      ?.map { it.trim() }
+      ?.filter { it.isNotEmpty() }
+      ?: emptyList()
+  }
+
+  /**
    * Back from the consent screen.
    *
    * RESULT_CANCELED is the ambiguous one: Android reports it both when the user
@@ -200,10 +331,16 @@ class GoogleDriveAuthModule : Module() {
       val result: AuthorizationResult =
         Identity.getAuthorizationClient(activity).getAuthorizationResultFromIntent(data)
       val token = result.accessToken
+      // Read on every path, not just the picker's: an ordinary authorization
+      // simply comes back with an empty list, and one result shape is one
+      // fewer thing for the JS side to branch on.
+      val picked = pickedFileIds(result)
       if (token != null) {
-        promise.resolve(outcome("granted", token = token))
+        promise.resolve(outcome("granted", token = token, pickedFileIds = picked))
       } else {
-        promise.resolve(outcome("failed", message = "Google returned no access token"))
+        promise.resolve(
+          outcome("failed", message = "Google returned no access token", pickedFileIds = picked)
+        )
       }
     } catch (e: Throwable) {
       promise.resolve(
@@ -234,13 +371,15 @@ class GoogleDriveAuthModule : Module() {
     token: String? = null,
     code: Int? = null,
     message: String? = null,
-    afterConsent: Boolean = false
+    afterConsent: Boolean = false,
+    pickedFileIds: List<String> = emptyList()
   ): Map<String, Any?> = mapOf(
     "outcome" to outcome,
     "token" to token,
     "code" to code,
     "message" to message,
-    "afterConsent" to afterConsent
+    "afterConsent" to afterConsent,
+    "pickedFileIds" to pickedFileIds
   )
 
   /**
@@ -284,5 +423,15 @@ class GoogleDriveAuthModule : Module() {
   companion object {
     /** Arbitrary, only has to be unique within this activity. */
     const val REQUEST_CODE = 0x0D12
+
+    /**
+     * The only scope this app ever asks for — and, in the picker flow, the only
+     * one Google permits: its documentation states `drive.file` "can't be
+     * combined with any other scope" there.
+     */
+    const val DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+
+    /** Key Google puts the picked ids under in the token response bundle. */
+    const val PICKED_FILE_IDS = "picked_file_ids"
   }
 }

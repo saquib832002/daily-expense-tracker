@@ -35,5 +35,19 @@ dependencies {
   // points to for OAuth scopes now that the old GoogleSignIn client is
   // deprecated — authorization was deliberately split away from sign-in, and
   // only the sign-in half is going away.
-  implementation "com.google.android.gms:play-services-auth:21.3.0"
+  //
+  // 21.6.0 is a floor, not a preference. Google's release notes for that
+  // version (27 May 2026) read "Added Drive Picker and Google Home Platform
+  // parameters" — it is the release that introduced
+  // AuthorizationRequest.ResourceParameter.PICKER_OAUTH_TRIGGER, which the
+  // office-mode join flow needs. 21.5.0 added AuthorizationRequest.Prompt,
+  // which it also needs. The previous pin, 21.3.0, has neither, and the
+  // symptom is an unresolved reference at compile time rather than anything
+  // subtle.
+  //
+  // 22.0.0 exists and is newer, but it removed the legacy Google Sign-In APIs
+  // outright. This module never used them — it has always been on
+  // AuthorizationClient — so 22 should be safe; 21.6.0 is the smaller step and
+  // the one to be on while the picker flow is still being proven.
+  implementation "com.google.android.gms:play-services-auth:21.6.0"
 }

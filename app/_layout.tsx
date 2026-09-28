@@ -215,6 +215,9 @@ export default function RootLayout() {
         <Stack.Screen name="cards" />
         <Stack.Screen name="convert" />
         <Stack.Screen name="statement" />
+        {/* Throwaway. Delete with app/picker-probe.tsx once the
+            office-mode join flow is proven. */}
+        <Stack.Screen name="picker-probe" />
         <Stack.Screen name="scan" />
       </Stack>
       </LockGate>

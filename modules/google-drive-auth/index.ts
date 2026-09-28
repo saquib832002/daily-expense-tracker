@@ -61,6 +61,31 @@ export interface AuthResult {
    * opposite responses.
    */
   afterConsent: boolean;
+  /**
+   * Files the user handed to this app through the Google Picker.
+   *
+   * Empty for an ordinary authorization, which is why it is always present
+   * rather than optional — one shape to handle instead of two. A `granted`
+   * outcome with an empty list after a pick means the user reached the picker
+   * and chose nothing, which is a cancel in everything but name.
+   */
+  pickedFileIds: string[];
+}
+
+export interface PickOptions {
+  /** Let the user choose more than one file. */
+  allowMultiple?: boolean;
+  /** Comma-separated MIME types to show. */
+  mimeTypes?: string;
+  /**
+   * Comma-separated file ids to restrict the picker to.
+   *
+   * This is what turns joining a company from "find the right file among four
+   * hundred" into "tap the one thing on the screen". The owner's invite link
+   * carries the ids; the staff member's app passes them straight through.
+   */
+  fileIds?: string;
+  allowFolders?: boolean;
 }
 
 export interface SigningInfo {
@@ -73,6 +98,7 @@ export interface SigningInfo {
 interface GoogleDriveAuthNativeModule {
   authorize(scopes: string[]): Promise<AuthResult>;
   authorizeSilently(scopes: string[]): Promise<AuthResult>;
+  pickFiles(options: PickOptions): Promise<AuthResult>;
   signingInfo(): SigningInfo;
 }
 
@@ -89,7 +115,49 @@ const UNAVAILABLE: AuthResult = {
   code: null,
   message: null,
   afterConsent: false,
+  pickedFileIds: [],
 };
+
+/**
+ * Is this build new enough to open the Google Picker?
+ *
+ * A separate question from `isAvailable()`. The picker arrived long after
+ * Drive backup did, so a phone can have a build with a working native module
+ * and no `pickFiles` in it — and the join screen needs to say "update the app"
+ * rather than "something went wrong".
+ */
+export function canPickFiles(): boolean {
+  return native != null && typeof native.pickFiles === 'function';
+}
+
+/**
+ * Hand the user the Google Picker, and come back with the files they chose.
+ *
+ * This is the only route by which `drive.file` reaches a file this app did not
+ * create — which is what makes office mode work: the owner creates the file,
+ * shares it with a staff member, and the staff member picks it once.
+ *
+ * Google's flow opens in the user's browser, so the screen calling this must
+ * say so first. Leaving the app with no warning reads as a crash.
+ */
+export async function pickFiles(options: PickOptions = {}): Promise<AuthResult> {
+  if (!native) return UNAVAILABLE;
+  if (typeof native.pickFiles !== 'function') {
+    return { ...UNAVAILABLE, message: 'This build has no Google Picker support' };
+  }
+  try {
+    return await native.pickFiles(options);
+  } catch (e) {
+    return {
+      outcome: 'failed',
+      token: null,
+      code: null,
+      message: e instanceof Error ? e.message : String(e),
+      afterConsent: false,
+      pickedFileIds: [],
+    };
+  }
+}
 
 /** Get a token, asking the user if needed. */
 export async function authorize(): Promise<AuthResult> {
@@ -106,6 +174,7 @@ export async function authorize(): Promise<AuthResult> {
       code: null,
       message: e instanceof Error ? e.message : String(e),
       afterConsent: false,
+      pickedFileIds: [],
     };
   }
 }
@@ -119,7 +188,14 @@ export async function authorizeSilently(): Promise<AuthResult> {
   try {
     return await native.authorizeSilently([DRIVE_FILE_SCOPE]);
   } catch {
-    return { outcome: 'cancelled', token: null, code: null, message: null, afterConsent: false };
+    return {
+      outcome: 'cancelled',
+      token: null,
+      code: null,
+      message: null,
+      afterConsent: false,
+      pickedFileIds: [],
+    };
   }
 }
 

@@ -234,6 +234,16 @@ export default function MoreScreen() {
           chevron
           onPress={() => router.push('/statement')}
         />
+        {/* Developer probe for the office-mode picker flow. Deliberately
+            untranslated and deliberately last — it is here to be run once on a
+            real device and then removed. */}
+        <ListRow
+          icon="🧪"
+          title="Picker probe"
+          subtitle="Test writing to a file another account owns"
+          chevron
+          onPress={() => router.push('/picker-probe')}
+        />
         <ListRow
           icon="🛡️"
           title={t('more.warranties')}

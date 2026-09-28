@@ -7,6 +7,7 @@
     "android": "expo run:android",
     "build:aab": "cd android && gradlew.bat bundleRelease",
     "build:apk": "cd android && gradlew.bat assembleRelease",
+    "bump": "node scripts/bump-version.js",
     "check:16kb": "node scripts/check-16kb.js",
     "db:generate": "drizzle-kit generate",
     "ios": "expo run:ios",
